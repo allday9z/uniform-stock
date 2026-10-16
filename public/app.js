@@ -113,6 +113,12 @@
   function field(label, input, req) { return '<div class="field"><label class="f' + (req ? " req" : "") + '">' + label + "</label>" + input + "</div>"; }
 
   // ---------- stock (HR) ----------
+  // % issued = issued ÷ (issued + remaining)
+  function pct(issued, remaining) { var t = issued + remaining; return t ? (Math.round(issued / t * 1000) / 10) + "%" : "—"; }
+  function issuedBar(issued, remaining, title, unit) {
+    var t = issued + remaining, w = t ? Math.round(issued / t * 100) : 0;
+    return '<div class="' + (title ? "card issued" : "issued") + '">' + (title ? "<b>" + title + "</b> " : "") + 'เบิกไปแล้ว <b>' + issued + "</b> จากทั้งหมด " + t + (unit ? " " + esc(unit) : "") + " (คงเหลือ " + remaining + ') · <b class="pctv">' + pct(issued, remaining) + '</b><div class="track"><div class="fill" style="width:' + w + '%"></div></div></div>';
+  }
   async function viewStock(q) {
     var data = await api("/api/stock");
     var filter = q.f || "", search = (q.s || "").toLowerCase();
@@ -124,22 +130,26 @@
       if (filter && !p.variants.some(function (v) { return v.status === filter; })) return false;
       return true;
     });
-    setView('<div class="row"><div><h1>สต๊อก</h1><p class="sub">ยอดคงเหลือแยกตาม SKU — กดชื่อสินค้าเพื่อดูความเคลื่อนไหว / แก้ไขสินค้า</p></div><div class="spacer"></div><button class="btn" id="add">+ เพิ่มสินค้า</button></div>' +
+    setView('<div class="row"><div><h1>สต๊อกชุดยูนิฟอร์ม</h1><p class="sub">ยอดคงเหลือและยอดเบิกแยกตามไซส์ — กดที่สินค้าเพื่อดูความเคลื่อนไหว / รับเข้า / ปรับยอด</p></div><div class="spacer"></div><button class="btn" id="add">+ เพิ่มสินค้า</button></div>' +
       '<div class="summary">' + cards.map(function (c) { return '<button class="sum ' + c[0] + (filter === c[0] && (c[0] || !filter) ? " on" : "") + '" data-f="' + c[0] + '"><b>' + c[2] + "</b><span>" + c[1] + "</span></button>"; }).join("") + "</div>" +
       '<div class="card" style="padding:12px 14px"><input class="i" id="search" placeholder="ค้นหาชื่อสินค้า รหัสสินค้า หรือ SKU" value="' + esc(q.s || "") + '"></div>' +
-      // Table: one header row per product, then one row per SKU (filter applies to SKUs).
-      (list.length ? '<div class="card" style="padding:6px 8px"><div class="scroll"><table class="t stock"><thead><tr><th>สินค้า / SKU</th><th>ไซส์</th><th>รอบอก</th><th>สี</th><th class="n">คงเหลือ</th><th>สถานะ</th><th></th></tr></thead><tbody>' + list.map(function (p) {
+      // Same product cards as before; inside each, a table: one column per size,
+      // rows คงเหลือ / เบิกไปแล้ว / % เบิก (เบิกไปแล้ว ÷ (เบิกไปแล้ว + คงเหลือ)).
+      issuedBar(data.summary.issued, data.summary.remaining, "ภาพรวมทุกสินค้า") +
+      (list.length ? '<div class="products wide">' + list.map(function (p) {
         var vs = filter ? p.variants.filter(function (v) { return v.status === filter; }) : p.variants;
-        return '<tr class="pgroup"><td colspan="4"><a href="#/stock/' + p.id + '"><b>' + esc(p.name) + '</b></a> <span class="muted small">' + esc(p.code) + (p.category ? " · " + esc(p.category) : "") + " · ใกล้หมดเมื่อ ≤ " + p.min + '</span></td><td class="n"><b>' + p.total + '</b> <span class="muted small">' + esc(p.unit) + '</span></td><td></td><td class="right nowrap"><a class="btn sm ghost" href="#/stock/' + p.id + '">ความเคลื่อนไหว</a></td></tr>' +
-          vs.map(function (v) {
-            return '<tr><td class="sku">' + esc(v.sku) + "</td><td>" + esc(v.size) + "</td><td>" + esc(v.chest || "") + "</td><td>" + esc(v.color) + '</td><td class="n"><b>' + v.qty + '</b></td><td><span class="badge ' + v.status + '">' + STATUS[v.status] + '</span></td><td class="right nowrap"><button class="btn sm" data-in="' + p.id + ":" + v.id + '">รับเข้า</button> <button class="btn sm ghost" data-adj="' + p.id + ":" + v.id + '">ปรับยอด</button></td></tr>';
-          }).join("");
-      }).join("") + "</tbody></table></div></div>" : '<div class="card empty">' + (data.products.length ? "ไม่พบสินค้าที่ตรงกับเงื่อนไข" : "ยังไม่มีสินค้า — กด \"+ เพิ่มสินค้า\" เพื่อเริ่มต้น") + "</div>"));
+        var colors = p.variants.map(function (v) { return v.color; }).filter(function (c, i, a) { return c && a.indexOf(c) === i; });
+        var head = function (v) { return esc((v.size || v.sku) + (colors.length > 1 && v.color ? " / " + v.color : "")) + (v.chest ? '<small>' + esc(v.chest) + "</small>" : ""); };
+        return '<div class="prod" data-id="' + p.id + '"><div class="total"><b>' + p.total + "</b>" + esc(p.unit) + "คงเหลือ</div><h3>" + esc(p.name) + '</h3><div class="meta">' + esc(p.code) + (p.category ? " · " + esc(p.category) : "") + (colors.length === 1 ? " · " + esc(colors[0]) : "") + " · ใกล้หมดเมื่อ ≤ " + p.min + "</div>" +
+          '<div class="scroll"><table class="t sizes"><thead><tr><th></th>' + vs.map(function (v) { return "<th>" + head(v) + "</th>"; }).join("") + '<th class="tot">รวม</th></tr></thead><tbody>' +
+          '<tr><th>คงเหลือ</th>' + vs.map(function (v) { return '<td><span class="chip ' + v.status + '" title="' + esc(v.sku) + " · " + STATUS[v.status] + '">' + v.qty + "</span></td>"; }).join("") + '<td class="tot"><b>' + p.total + "</b></td></tr>" +
+          '<tr><th>เบิกไปแล้ว</th>' + vs.map(function (v) { return "<td>" + v.issued + "</td>"; }).join("") + '<td class="tot"><b>' + p.issued + "</b></td></tr>" +
+          '<tr><th>% เบิก</th>' + vs.map(function (v) { return "<td>" + pct(v.issued, v.qty) + "</td>"; }).join("") + '<td class="tot"><b>' + pct(p.issued, p.total) + "</b></td></tr>" +
+          "</tbody></table></div>" + issuedBar(p.issued, p.total, null, p.unit) + "</div>";
+      }).join("") + "</div>" : '<div class="card empty">' + (data.products.length ? "ไม่พบสินค้าที่ตรงกับเงื่อนไข" : "ยังไม่มีสินค้า — กด \"+ เพิ่มสินค้า\" เพื่อเริ่มต้น") + "</div>"));
     $$(".sum").forEach(function (b) { b.onclick = function () { nav("#/stock", { f: b.dataset.f, s: $("#search").value }); }; });
     $("#search").addEventListener("input", debounce(function () { nav("#/stock", { f: filter, s: $("#search").value }, true); }, 300));
-    function pv(key) { var k = key.split(":"), p = data.products.find(function (x) { return x.id == k[0]; }); return [p, p.variants.find(function (v) { return v.id == k[1]; })]; }
-    $$("[data-in]").forEach(function (b) { b.onclick = function () { var x = pv(b.dataset.in); qtyDialog("in", x[0], x[1]); }; });
-    $$("[data-adj]").forEach(function (b) { b.onclick = function () { var x = pv(b.dataset.adj); qtyDialog("adj", x[0], x[1]); }; });
+    $$(".prod").forEach(function (el) { el.onclick = function () { location.hash = "#/stock/" + el.dataset.id; }; });
     $("#add").onclick = function () { productEditor(null); };
     if (q.s) { var si = $("#search"); si.focus(); si.setSelectionRange(si.value.length, si.value.length); }
   }

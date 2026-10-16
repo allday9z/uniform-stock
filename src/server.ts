@@ -273,16 +273,21 @@ async function productsWithStock(where?: number) {
     : await sql`SELECT * FROM uni_products WHERE deleted_at IS NULL ORDER BY category, name`
   const ids = products.map((p: any) => p.id)
   const variants = ids.length ? await sql`SELECT * FROM uni_variants WHERE product_id IN ${sql(ids)} AND deleted_at IS NULL ORDER BY sort, id` : []
+  // Issued so far per SKU = every "out" movement (approved requests).
+  const vids = variants.map((v: any) => v.id)
+  const issuedRows = vids.length ? await sql`SELECT variant_id, COALESCE(-sum(qty), 0)::int AS issued FROM uni_moves WHERE type = 'out' AND variant_id IN ${sql(vids)} GROUP BY variant_id` : []
+  const issued = new Map<number, number>(issuedRows.map((r: any) => [r.variant_id, r.issued]))
   return products.map((p: any) => {
-    const vs = variants.filter((v: any) => v.product_id === p.id).map((v: any) => ({ id: v.id, sku: v.sku, size: v.size, color: v.color, chest: v.chest, qty: v.qty, status: stockStatus(v.qty, p.min_qty) }))
-    return { id: p.id, name: p.name, code: p.code, category: p.category, unit: p.unit, min: p.min_qty, total: vs.reduce((s: number, v: any) => s + v.qty, 0), variants: vs }
+    const vs = variants.filter((v: any) => v.product_id === p.id).map((v: any) => ({ id: v.id, sku: v.sku, size: v.size, color: v.color, chest: v.chest, qty: v.qty, issued: issued.get(v.id) ?? 0, status: stockStatus(v.qty, p.min_qty) }))
+    return { id: p.id, name: p.name, code: p.code, category: p.category, unit: p.unit, min: p.min_qty, total: vs.reduce((s: number, v: any) => s + v.qty, 0), issued: vs.reduce((s: number, v: any) => s + v.issued, 0), variants: vs }
   })
 }
 
 app.get("/api/stock", async (c) => {
   const products = await productsWithStock()
   const all = products.flatMap((p: any) => p.variants)
-  const summary = { skus: all.length, ok: all.filter((v: any) => v.status === "ok").length, low: all.filter((v: any) => v.status === "low").length, out: all.filter((v: any) => v.status === "out").length }
+  const summary = { skus: all.length, ok: all.filter((v: any) => v.status === "ok").length, low: all.filter((v: any) => v.status === "low").length, out: all.filter((v: any) => v.status === "out").length,
+    remaining: all.reduce((s: number, v: any) => s + v.qty, 0), issued: all.reduce((s: number, v: any) => s + v.issued, 0) }
   return c.json({ products, summary })
 })
 

@@ -131,9 +131,19 @@ table.t { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .ack { display: flex; gap: 8px; align-items: center; margin: 12px 0; font-weight: 600; }
 .slipimg { max-width: 100%; max-height: 260px; border-radius: 8px; border: 1px solid var(--line); margin-top: 6px; }
 .modal h3, .card h3 { font-size: 15.5px; }
-/* stock table */
-table.stock tr.pgroup td { background: #f3f8f8; border-top: 2px solid var(--line); padding-top: 10px; }
-table.stock tr.pgroup a { text-decoration: none; color: var(--ink); }
-table.stock td.sku { padding-left: 22px; color: #374151; }
+/* stock cards with size tables (Oct 2026) */
+.products.wide { grid-template-columns: minmax(0, 1fr); }
+.products.wide > .prod { min-width: 0; }
+table.sizes { margin-top: 4px; }
+table.sizes th, table.sizes td { text-align: center; padding: 6px 6px; white-space: nowrap; }
+table.sizes thead th { color: var(--ink); font-size: 13px; } table.sizes thead th small { display: block; color: var(--muted); font-weight: 400; font-size: 11px; }
+table.sizes tbody th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12.5px; }
+table.sizes .tot { background: #f3f8f8; font-weight: 700; }
+table.sizes td { vertical-align: middle; }
+table.sizes td .chip { display: inline-block; min-width: 34px; }
+.issued { margin-top: 10px; font-size: 13px; color: #374151; }
+.issued .pctv { color: var(--teal-d); }
+.issued .track { background: #eef1f3; border-radius: 6px; height: 8px; overflow: hidden; margin-top: 6px; } .issued .fill { background: var(--teal); height: 100%; }
+.card.issued { font-size: 14px; }
 .lrow.item { grid-template-columns: 2fr 1.4fr 90px; }
 .lrow.item #itemSku[hidden] + #itemQty { grid-column: span 2; max-width: 120px; }
