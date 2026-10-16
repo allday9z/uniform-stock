@@ -119,6 +119,17 @@
     var t = issued + remaining, w = t ? Math.round(issued / t * 100) : 0;
     return '<div class="' + (title ? "card issued" : "issued") + '">' + (title ? "<b>" + title + "</b> " : "") + 'เบิกไปแล้ว <b>' + issued + "</b> จากทั้งหมด " + t + (unit ? " " + esc(unit) : "") + " (คงเหลือ " + remaining + ') · <b class="pctv">' + pct(issued, remaining) + '</b><div class="track"><div class="fill" style="width:' + w + '%"></div></div></div>';
   }
+  // Per-size table for one product: คงเหลือ / เบิกไปแล้ว / % เบิก (+ total column and bar).
+  function sizeTable(p) {
+    var vs = p.variants;
+    var colors = vs.map(function (v) { return v.color; }).filter(function (c, i, a) { return c && a.indexOf(c) === i; });
+    var head = function (v) { return esc((v.size || v.sku) + (colors.length > 1 && v.color ? " / " + v.color : "")) + (v.chest ? "<small>" + esc(v.chest) + "</small>" : ""); };
+    return '<div class="scroll"><table class="t sizes"><thead><tr><th></th>' + vs.map(function (v) { return "<th>" + head(v) + "</th>"; }).join("") + '<th class="tot">รวม</th></tr></thead><tbody>' +
+      '<tr><th>คงเหลือ</th>' + vs.map(function (v) { return '<td><span class="chip ' + v.status + '" title="' + esc(v.sku) + " · " + STATUS[v.status] + '">' + v.qty + "</span></td>"; }).join("") + '<td class="tot">' + p.total + "</td></tr>" +
+      '<tr><th>เบิกไปแล้ว</th>' + vs.map(function (v) { return "<td>" + v.issued + "</td>"; }).join("") + '<td class="tot">' + p.issued + "</td></tr>" +
+      '<tr><th>% เบิก</th>' + vs.map(function (v) { return "<td>" + pct(v.issued, v.qty) + "</td>"; }).join("") + '<td class="tot">' + pct(p.issued, p.total) + "</td></tr>" +
+      "</tbody></table></div>" + issuedBar(p.issued, p.total, null, p.unit);
+  }
   async function viewStock(q) {
     var data = await api("/api/stock");
     var filter = q.f || "", search = (q.s || "").toLowerCase();
@@ -130,22 +141,13 @@
       if (filter && !p.variants.some(function (v) { return v.status === filter; })) return false;
       return true;
     });
-    setView('<div class="row"><div><h1>สต๊อกชุดยูนิฟอร์ม</h1><p class="sub">ยอดคงเหลือและยอดเบิกแยกตามไซส์ — กดที่สินค้าเพื่อดูความเคลื่อนไหว / รับเข้า / ปรับยอด</p></div><div class="spacer"></div><button class="btn" id="add">+ เพิ่มสินค้า</button></div>' +
+    setView('<div class="row"><div><h1>สต๊อกชุดยูนิฟอร์ม</h1><p class="sub">ยอดคงเหลือแยกตาม SKU (ไซส์ × สี) — กดที่สินค้าเพื่อดูความเคลื่อนไหว</p></div><div class="spacer"></div><button class="btn" id="add">+ เพิ่มสินค้า</button></div>' +
       '<div class="summary">' + cards.map(function (c) { return '<button class="sum ' + c[0] + (filter === c[0] && (c[0] || !filter) ? " on" : "") + '" data-f="' + c[0] + '"><b>' + c[2] + "</b><span>" + c[1] + "</span></button>"; }).join("") + "</div>" +
       '<div class="card" style="padding:12px 14px"><input class="i" id="search" placeholder="ค้นหาชื่อสินค้า รหัสสินค้า หรือ SKU" value="' + esc(q.s || "") + '"></div>' +
-      // Same product cards as before; inside each, a table: one column per size,
-      // rows คงเหลือ / เบิกไปแล้ว / % เบิก (เบิกไปแล้ว ÷ (เบิกไปแล้ว + คงเหลือ)).
-      issuedBar(data.summary.issued, data.summary.remaining, "ภาพรวมทุกสินค้า") +
-      (list.length ? '<div class="products wide">' + list.map(function (p) {
+      (list.length ? '<div class="products">' + list.map(function (p) {
         var vs = filter ? p.variants.filter(function (v) { return v.status === filter; }) : p.variants;
-        var colors = p.variants.map(function (v) { return v.color; }).filter(function (c, i, a) { return c && a.indexOf(c) === i; });
-        var head = function (v) { return esc((v.size || v.sku) + (colors.length > 1 && v.color ? " / " + v.color : "")) + (v.chest ? '<small>' + esc(v.chest) + "</small>" : ""); };
-        return '<div class="prod" data-id="' + p.id + '"><div class="total"><b>' + p.total + "</b>" + esc(p.unit) + "คงเหลือ</div><h3>" + esc(p.name) + '</h3><div class="meta">' + esc(p.code) + (p.category ? " · " + esc(p.category) : "") + (colors.length === 1 ? " · " + esc(colors[0]) : "") + " · ใกล้หมดเมื่อ ≤ " + p.min + "</div>" +
-          '<div class="scroll"><table class="t sizes"><thead><tr><th></th>' + vs.map(function (v) { return "<th>" + head(v) + "</th>"; }).join("") + '<th class="tot">รวม</th></tr></thead><tbody>' +
-          '<tr><th>คงเหลือ</th>' + vs.map(function (v) { return '<td><span class="chip ' + v.status + '" title="' + esc(v.sku) + " · " + STATUS[v.status] + '">' + v.qty + "</span></td>"; }).join("") + '<td class="tot"><b>' + p.total + "</b></td></tr>" +
-          '<tr><th>เบิกไปแล้ว</th>' + vs.map(function (v) { return "<td>" + v.issued + "</td>"; }).join("") + '<td class="tot"><b>' + p.issued + "</b></td></tr>" +
-          '<tr><th>% เบิก</th>' + vs.map(function (v) { return "<td>" + pct(v.issued, v.qty) + "</td>"; }).join("") + '<td class="tot"><b>' + pct(p.issued, p.total) + "</b></td></tr>" +
-          "</tbody></table></div>" + issuedBar(p.issued, p.total, null, p.unit) + "</div>";
+        return '<div class="prod" data-id="' + p.id + '"><div class="total"><b>' + p.total + "</b>" + esc(p.unit) + "คงเหลือ</div><h3>" + esc(p.name) + '</h3><div class="meta">' + esc(p.code) + (p.category ? " · " + esc(p.category) : "") + " · ใกล้หมดเมื่อ ≤ " + p.min + '</div><div class="chips">' +
+          vs.map(function (v) { return '<span class="chip ' + v.status + '" title="' + esc(v.sku) + " · " + STATUS[v.status] + (v.chest ? " · รอบอก " + esc(v.chest) : "") + '">' + esc([v.size, v.color].filter(Boolean).join(" / ") || v.sku) + " · " + v.qty + "</span>"; }).join("") + "</div></div>";
       }).join("") + "</div>" : '<div class="card empty">' + (data.products.length ? "ไม่พบสินค้าที่ตรงกับเงื่อนไข" : "ยังไม่มีสินค้า — กด \"+ เพิ่มสินค้า\" เพื่อเริ่มต้น") + "</div>"));
     $$(".sum").forEach(function (b) { b.onclick = function () { nav("#/stock", { f: b.dataset.f, s: $("#search").value }); }; });
     $("#search").addEventListener("input", debounce(function () { nav("#/stock", { f: filter, s: $("#search").value }, true); }, 300));
@@ -160,6 +162,7 @@
     var p = d.product;
     setView('<p class="small"><a href="#/stock">← สต๊อก</a></p><div class="row"><div><h1>' + esc(p.name) + '</h1><p class="sub">' + esc(p.code) + (p.category ? " · " + esc(p.category) : "") + " · หน่วย " + esc(p.unit) + " · ใกล้หมดเมื่อ ≤ " + p.min + " · คงเหลือรวม <b>" + p.total + "</b></p></div><div class=\"spacer\"></div>" +
       '<button class="btn ghost" id="edit">แก้ไขสินค้า / เพิ่ม SKU</button><button class="btn danger" id="del">ลบสินค้า</button></div>' +
+      '<div class="card"><h3 style="margin-top:0">สรุปคงเหลือ / การเบิก แยกตามไซส์</h3>' + sizeTable(p) + "</div>" +
       '<div class="card"><h3 style="margin-top:0">SKU</h3><div class="scroll"><table class="t"><thead><tr><th>รหัส SKU</th><th>ไซส์</th><th>รอบอก</th><th>สี</th><th class="n">คงเหลือ</th><th>สถานะ</th><th></th></tr></thead><tbody>' +
       p.variants.map(function (v) {
         return "<tr><td>" + esc(v.sku) + "</td><td>" + esc(v.size) + "</td><td>" + esc(v.chest || "") + "</td><td>" + esc(v.color) + '</td><td class="n"><b>' + v.qty + '</b></td><td><span class="badge ' + v.status + '">' + STATUS[v.status] + '</span></td><td class="nowrap right">' +
