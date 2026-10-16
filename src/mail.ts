@@ -32,10 +32,10 @@ export function shippedEmail(r: Req, lines: Line[], dateTH: string): { subject: 
   const rows = lines.map((l) => `<tr><td style="padding:6px 8px;border-bottom:1px solid #e6ecec;">${esc(l.product_name)}</td><td style="padding:6px 8px;border-bottom:1px solid #e6ecec;">${esc([l.size, l.color].filter(Boolean).join(" / "))}</td><td style="padding:6px 8px;border-bottom:1px solid #e6ecec;text-align:right;">${l.qty} ${esc(l.unit)}</td></tr>`).join("")
   const html = `<div style="font-family:Arial,'Sarabun',sans-serif;background:#f4f7f7;padding:20px 10px;">
   <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;border:1px solid #dde5e5;">
-    <div style="background:#0a5f66;color:#fff;padding:18px 22px;"><div style="font-size:12px;opacity:.85;">ระบบเบิกจ่ายชุดยูนิฟอร์ม</div><div style="font-size:18px;font-weight:700;margin-top:4px;">จัดส่งเสื้อยูนิฟอร์มแล้ว</div></div>
+    <div style="background:#0a5f66;color:#fff;padding:18px 22px;"><div style="font-size:12px;opacity:.85;">ระบบเบิกจ่ายชุดยูนิฟอร์ม</div><div style="font-size:18px;font-weight:700;margin-top:4px;">จัดส่งรายการที่ขอแล้ว</div></div>
     <div style="padding:18px 22px;font-size:14px;color:#1f2d2d;line-height:1.6;">
       <p style="margin:0 0 10px;">เรียน คุณ${esc(r.name)}</p>
-      <p style="margin:0 0 10px;">HR ได้จัดส่งเสื้อยูนิฟอร์มตามคำขอของคุณแล้ว</p>
+      <p style="margin:0 0 10px;">HR ได้จัดส่งรายการตามคำขอของคุณแล้ว</p>
       <table style="font-size:14px;margin:0 0 12px;">
         <tr><td style="color:#5b6b6b;padding-right:12px;">เลขที่คำขอ</td><td><b>${esc(r.no)}</b></td></tr>
         ${r.dn_no ? `<tr><td style="color:#5b6b6b;padding-right:12px;">ใบส่งสินค้า</td><td>${esc(r.dn_no)}</td></tr>` : ""}
@@ -48,7 +48,7 @@ export function shippedEmail(r: Req, lines: Line[], dateTH: string): { subject: 
       <p style="margin:14px 0 0;color:#5b6b6b;font-size:12.5px;">อีเมลนี้ส่งอัตโนมัติจากระบบ กรุณาอย่าตอบกลับ หากมีข้อสงสัยติดต่อ HR</p>
     </div>
   </div></div>`
-  return { subject: `จัดส่งเสื้อยูนิฟอร์มแล้ว — ${r.no} (${dateTH})`, html }
+  return { subject: `จัดส่งรายการที่ขอแล้ว — ${r.no} (${dateTH})`, html }
 }
 
 export async function sendMail(to: string, subject: string, html: string): Promise<void> {

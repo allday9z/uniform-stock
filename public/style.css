@@ -131,3 +131,9 @@ table.t { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .ack { display: flex; gap: 8px; align-items: center; margin: 12px 0; font-weight: 600; }
 .slipimg { max-width: 100%; max-height: 260px; border-radius: 8px; border: 1px solid var(--line); margin-top: 6px; }
 .modal h3, .card h3 { font-size: 15.5px; }
+/* stock table */
+table.stock tr.pgroup td { background: #f3f8f8; border-top: 2px solid var(--line); padding-top: 10px; }
+table.stock tr.pgroup a { text-decoration: none; color: var(--ink); }
+table.stock td.sku { padding-left: 22px; color: #374151; }
+.lrow.item { grid-template-columns: 2fr 1.4fr 90px; }
+.lrow.item #itemSku[hidden] + #itemQty { grid-column: span 2; max-width: 120px; }

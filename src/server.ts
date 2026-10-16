@@ -23,16 +23,28 @@ const PORT = Number(process.env.PORT ?? 3000)
 const COOKIE = "uni_session"
 const SESSION_DAYS = 30
 const HR_SETUP_CODE = process.env.HR_SETUP_CODE ?? ""
-// Request types (HR spec, Oct 2026): a fixed number of shirts per type, or an
-// employee purchase (any number, paid — amount from the price table in settings).
-type RequestType = { label: string; qty?: number; purchase?: boolean }
-const REQUEST_TYPES: RequestType[] = [
-  { label: "พนักงานใหม่ (2 ตัว)", qty: 2 },
-  { label: "พนักงานใหม่ (1 ตัว สำหรับพนักงาน HO)", qty: 1 },
-  { label: "พนักงานผ่านทดลองงาน (3 ตัว)", qty: 3 },
-  { label: "พนักงานต่อสัญญาจ้าง (3 ตัว)", qty: 3 },
-  { label: "พนักงานต้องการซื้อเสื้อเพิ่ม", purchase: true },
+// Request types (HR spec, Oct 2026).
+//  item "shirt": a fixed number of shirts per type, or a paid purchase (price table).
+//  other items (lanyard / card holder / ID card): quantity × unit price (prices editable
+//  in settings). An item draws stock from the product HR links to it in settings; an
+//  item with no linked product (e.g. issuing a new ID card) is a service — no stock.
+type Item = "shirt" | "lanyard" | "cardholder" | "idcard"
+type RequestType = { label: string; item: Item; qty?: number; purchase?: boolean; priceKey?: string; price?: number }
+const ITEMS: { key: Item; label: string }[] = [
+  { key: "shirt", label: "เสื้อยูนิฟอร์ม" }, { key: "lanyard", label: "สายคล้องคอ" }, { key: "cardholder", label: "กรอบบัตร" }, { key: "idcard", label: "บัตรพนักงาน" },
 ]
+const REQUEST_TYPES: RequestType[] = [
+  { label: "พนักงานใหม่ (2 ตัว)", item: "shirt", qty: 2 },
+  { label: "พนักงานใหม่ (1 ตัว สำหรับพนักงาน HO)", item: "shirt", qty: 1 },
+  { label: "พนักงานผ่านทดลองงาน (3 ตัว)", item: "shirt", qty: 3 },
+  { label: "พนักงานต่อสัญญาจ้าง (3 ตัว)", item: "shirt", qty: 3 },
+  { label: "พนักงานต้องการซื้อเสื้อเพิ่ม", item: "shirt", purchase: true },
+  { label: "สายคล้องคอ", item: "lanyard", priceKey: "lanyard", price: 50 },
+  { label: "กรอบบัตร (กรณีสูญหาย)", item: "cardholder", priceKey: "cardholder_lost", price: 50 },
+  { label: "เปลี่ยนกรอบบัตร (กรณีชำรุด)", item: "cardholder", priceKey: "cardholder_damaged", price: 0 },
+  { label: "ออกบัตรใหม่", item: "idcard", priceKey: "idcard", price: 200 },
+]
+const DEFAULT_PRICES: Record<string, number> = Object.fromEntries(REQUEST_TYPES.filter((t) => t.priceKey).map((t) => [t.priceKey!, t.price!]))
 const MAX_SLIP_BYTES = 6 * 1024 * 1024
 const SLIP_TYPES = ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "application/pdf"]
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
@@ -181,12 +193,14 @@ app.use("/api/*", async (c, next) => {
 const hrOnly = async (c: any, next: any) => { if (!isHR(c)) return bad(c, "forbidden", 403); await next() }
 
 // ---------- settings ----------
-type Settings = { company: string; branches: string[]; depts: string[]; positions: string[]; priceTable: string; payInfo: string }
+type Settings = { company: string; branches: string[]; depts: string[]; positions: string[]; priceTable: string; payInfo: string; prices: Record<string, number>; itemProducts: Record<string, number | null> }
 // priceTable: one "จำนวน=ราคา" per line; quantities not listed = qty × price of 1 shirt.
 const DEFAULT_PRICE_TABLE = "1=230\n2=480"
 async function getSettings(): Promise<Settings> {
   const [r] = await sql`SELECT value FROM uni_settings WHERE key = 'main'`
-  return { company: "", branches: [], depts: [], positions: [], priceTable: DEFAULT_PRICE_TABLE, payInfo: "", ...(r?.value ?? {}) }
+  const v = r?.value ?? {}
+  return { company: "", branches: [], depts: [], positions: [], priceTable: DEFAULT_PRICE_TABLE, payInfo: "", ...v,
+    prices: { ...DEFAULT_PRICES, ...(v.prices ?? {}) }, itemProducts: { lanyard: null, cardholder: null, idcard: null, ...(v.itemProducts ?? {}) } }
 }
 function parsePriceTable(text: string): Map<number, number> {
   const m = new Map<number, number>()
@@ -201,14 +215,35 @@ function priceFor(qty: number, s: Settings): number {
   if (t.has(qty)) return t.get(qty)!
   return qty * (t.get(1) ?? 230)
 }
-app.get("/api/settings", async (c) => c.json({ ...(await getSettings()), requestTypes: REQUEST_TYPES, mailEnabled }))
+// Types as the form needs them: unit price resolved from settings.
+function typesFor(s: Settings) {
+  return REQUEST_TYPES.map((t) => (t.priceKey ? { ...t, price: s.prices[t.priceKey] ?? t.price } : t))
+}
+// Products linked to a non-shirt item — they don't appear in the shirt list.
+function linkedProductIds(s: Settings): number[] {
+  return Object.values(s.itemProducts).filter((x): x is number => Number.isInteger(x))
+}
+app.get("/api/settings", async (c) => { const s = await getSettings(); return c.json({ ...s, requestTypes: typesFor(s), items: ITEMS, mailEnabled }) })
 app.put("/api/settings", hrOnly, async (c) => {
   const b = await c.req.json().catch(() => ({}))
   const list = (v: any) => (Array.isArray(v) ? v : String(v ?? "").split("\n")).map((s: any) => str(s, 100)).filter(Boolean).filter((s: string, i: number, a: string[]) => a.indexOf(s) === i).slice(0, 300)
   const priceTable = String(b.priceTable ?? "").split("\n").map((l) => l.trim()).filter(Boolean)
   for (const l of priceTable) if (!/^\d+\s*[=:]\s*\d+$/.test(l)) return bad(c, `ราคาตามจำนวนไม่ถูกต้อง: "${l}" (ใช้รูปแบบ จำนวน=ราคา เช่น 1=230)`)
   if (!parsePriceTable(priceTable.join("\n")).has(1)) return bad(c, "ราคาตามจำนวนต้องมีราคาของ 1 ตัว (เช่น 1=230)")
-  const value: Settings = { company: str(b.company, 200), branches: list(b.branches), depts: list(b.depts), positions: list(b.positions), priceTable: priceTable.join("\n"), payInfo: str(b.payInfo, 1000) }
+  const prices: Record<string, number> = {}
+  for (const k of Object.keys(DEFAULT_PRICES)) {
+    const v = b.prices?.[k] === undefined || b.prices?.[k] === "" ? DEFAULT_PRICES[k] : int(b.prices[k])
+    if (!Number.isInteger(v) || v < 0 || v > 100000) return bad(c, "ราคาต้องเป็นจำนวนเต็มตั้งแต่ 0")
+    prices[k] = v
+  }
+  const itemProducts: Record<string, number | null> = {}
+  const live = new Set((await sql`SELECT id FROM uni_products WHERE deleted_at IS NULL`).map((r: any) => r.id))
+  for (const k of ["lanyard", "cardholder", "idcard"]) {
+    const v = b.itemProducts?.[k] ? int(b.itemProducts[k]) : null
+    if (v !== null && !live.has(v)) return bad(c, "สินค้าที่ผูกกับประเภทไม่ถูกต้อง")
+    itemProducts[k] = v
+  }
+  const value: Settings = { company: str(b.company, 200), branches: list(b.branches), depts: list(b.depts), positions: list(b.positions), priceTable: priceTable.join("\n"), payInfo: str(b.payInfo, 1000), prices, itemProducts }
   await sql`UPDATE uni_settings SET value = ${sql.json(value)} WHERE key = 'main'`
   return c.json(value)
 })
@@ -421,8 +456,10 @@ app.post("/api/requests", async (c) => {
   if (settings.positions.length && !settings.positions.includes(f.position)) return bad(c, "กรุณาเลือกตำแหน่งจากรายการ")
   if (settings.depts.length && f.dept && !settings.depts.includes(f.dept)) return bad(c, "กรุณาเลือกแผนกจากรายการ")
   if (settings.depts.length && !f.dept) return bad(c, "กรุณาเลือกแผนก")
-  const type = REQUEST_TYPES.find((t) => t.label === f.type)
+  const type = typesFor(settings).find((t) => t.label === f.type)
   if (!type) return bad(c, "กรุณาเลือกประเภทการเบิก")
+  const linked = linkedProductIds(settings)
+  const itemProduct = type.item === "shirt" ? null : settings.itemProducts[type.item] ?? null
   const rawLines = Array.isArray(b.lines) ? b.lines : []
   const want = new Map<number, number>()
   for (const l of rawLines) {
@@ -430,24 +467,35 @@ app.post("/api/requests", async (c) => {
     if (!Number.isInteger(vid) || !Number.isInteger(qty) || qty <= 0 || qty > 999) return bad(c, "จำนวนต้องเป็นจำนวนเต็ม 1–999")
     want.set(vid, (want.get(vid) ?? 0) + qty)
   }
-  if (!want.size) return bad(c, "กรุณาเลือกไซส์และจำนวนเสื้ออย่างน้อย 1 รายการ")
-  if (want.size > 30) return bad(c, "ได้สูงสุด 30 รายการต่อคำขอ")
-  const total = [...want.values()].reduce((a, n) => a + n, 0)
+  // Service item (no linked stock product): just a quantity, no lines.
+  const service = type.item !== "shirt" && !itemProduct
+  if (service) {
+    want.clear()
+    const q = int(b.qty)
+    if (!Number.isInteger(q) || q < 1 || q > 99) return bad(c, "จำนวนต้องเป็นจำนวนเต็ม 1–99")
+  } else {
+    if (!want.size) return bad(c, type.item === "shirt" ? "กรุณาเลือกไซส์และจำนวนเสื้ออย่างน้อย 1 รายการ" : "กรุณาระบุจำนวน")
+    if (want.size > 30) return bad(c, "ได้สูงสุด 30 รายการต่อคำขอ")
+  }
+  const total = service ? int(b.qty) : [...want.values()].reduce((a, n) => a + n, 0)
   if (type.qty && total !== type.qty) return bad(c, `ประเภท "${type.label}" เบิกได้ ${type.qty} ตัว (ตอนนี้เลือก ${total} ตัว)`)
-  let amount = 0
-  if (type.purchase) {
-    amount = priceFor(total, settings)
-    if (b.ack_hr !== true) return bad(c, "กรุณายืนยันว่าสอบถาม HR เรื่องจำนวนเสื้อคงเหลือและไซซ์แล้ว")
+  const amount = type.item === "shirt" ? (type.purchase ? priceFor(total, settings) : 0) : total * (type.price ?? 0)
+  if (amount > 0) {
+    if (b.ack_hr !== true) return bad(c, "กรุณายืนยันว่าสอบถาม HR เรื่องจำนวนคงเหลือแล้ว")
     if (!slip) return bad(c, "กรุณาแนบหลักฐานการชำระเงิน")
     if (slip.size > MAX_SLIP_BYTES) return bad(c, "ไฟล์หลักฐานการชำระเงินใหญ่เกิน 6 MB")
     if (!SLIP_TYPES.includes(slip.type)) return bad(c, "หลักฐานการชำระเงินต้องเป็นรูปภาพ หรือ PDF")
     if (int(b.amount) !== amount) return bad(c, `ยอดชำระไม่ตรงกับระบบ (${amount.toLocaleString()} บาท) กรุณารีเฟรชแล้วลองใหม่`)
   }
-  const vs = await sql`
+  const vs = want.size ? await sql`
     SELECT v.id, v.sku, v.size, v.color, p.id AS product_id, p.name, p.category, p.unit
     FROM uni_variants v JOIN uni_products p ON p.id = v.product_id
-    WHERE v.id IN ${sql([...want.keys()])} AND v.deleted_at IS NULL AND p.deleted_at IS NULL`
+    WHERE v.id IN ${sql([...want.keys()])} AND v.deleted_at IS NULL AND p.deleted_at IS NULL` : []
   if (vs.length !== want.size) return bad(c, "มีรายการที่ไม่พบในระบบ กรุณาเลือกใหม่")
+  // Lines must come from the right product: the linked one for an item, an unlinked one for shirts.
+  for (const v of vs as any[]) {
+    if (itemProduct ? v.product_id !== itemProduct : linked.includes(v.product_id)) return bad(c, "รายการที่เลือกไม่ตรงกับประเภทการเบิก กรุณาเลือกใหม่")
+  }
   const slipBytes = slip ? new Uint8Array(await slip.arrayBuffer()) : null
   const slipMime = slipBytes ? sniffSlip(slipBytes) : null
   if (slipBytes && !slipMime) return bad(c, "หลักฐานการชำระเงินต้องเป็นไฟล์รูปภาพ (JPG, PNG, WEBP, HEIC) หรือ PDF")
@@ -459,7 +507,7 @@ app.post("/api/requests", async (c) => {
     }
     const no = await nextNo(tx, `REQ-${thaiDateStamp()}`)
     const [r] = await tx`INSERT INTO uni_requests (no, req_date, name, emp_code, position, dept, branch, phone, email, type, kind, total_qty, amount, slip_file_id, note, requester_id)
-      VALUES (${no}, ${f.req_date}, ${f.name}, ${f.emp_code}, ${f.position}, ${f.dept}, ${f.branch}, ${f.phone}, ${f.email}, ${f.type}, ${type.purchase ? "purchase" : "issue"}, ${total}, ${amount}, ${slipId}, ${f.note}, ${me.id}) RETURNING id`
+      VALUES (${no}, ${f.req_date}, ${f.name}, ${f.emp_code}, ${f.position}, ${f.dept}, ${f.branch}, ${f.phone}, ${f.email}, ${f.type}, ${amount > 0 ? "purchase" : "issue"}, ${total}, ${amount}, ${slipId}, ${f.note}, ${me.id}) RETURNING id`
     for (const v of vs) await tx`INSERT INTO uni_request_lines (request_id, product_id, variant_id, product_name, category, unit, sku, size, color, qty)
       VALUES (${r.id}, ${v.product_id}, ${v.id}, ${v.name}, ${v.category}, ${v.unit}, ${v.sku}, ${v.size}, ${v.color}, ${want.get(v.id)!})`
     // Remember the requester's details for the next form.
@@ -534,7 +582,7 @@ app.post("/api/requests/:no/approve", hrOnly, async (c) => {
       if (!r || r.status !== "pending") throw new Error("คำขอนี้ไม่ได้อยู่ในสถานะรออนุมัติแล้ว")
       const lines = await tx`SELECT * FROM uni_request_lines WHERE request_id = ${r.id} ORDER BY variant_id`
       const vids = lines.map((l: any) => l.variant_id)
-      const vs = await tx`SELECT id, qty, deleted_at FROM uni_variants WHERE id IN ${tx(vids)} ORDER BY id FOR UPDATE`
+      const vs = vids.length ? await tx`SELECT id, qty, deleted_at FROM uni_variants WHERE id IN ${tx(vids)} ORDER BY id FOR UPDATE` : []   // service request: no stock
       const short: string[] = []
       for (const l of lines) {
         const v = vs.find((x: any) => x.id === l.variant_id)
@@ -590,7 +638,7 @@ async function notifyShipped(r: any): Promise<{ sent: boolean; error: string }> 
   if (!r.email) { await sql`UPDATE uni_requests SET notify_error = ${"ไม่มีอีเมลในคำขอ"} WHERE id = ${r.id}`; return { sent: false, error: "ไม่มีอีเมลในคำขอ" } }
   try {
     const lines = await sql`SELECT * FROM uni_request_lines WHERE request_id = ${r.id} ORDER BY id`
-    const m = shippedEmail(r, lines as any, thaiDate(r.shipped_date))
+    const m = shippedEmail(r, (lines.length ? lines : [{ product_name: r.type, size: "", color: "", qty: r.total_qty, unit: "" }]) as any, thaiDate(r.shipped_date))
     await sendMail(r.email, m.subject, m.html)
     await sql`UPDATE uni_requests SET notify_sent_at = NOW(), notify_error = '' WHERE id = ${r.id}`
     console.log("[notify] shipped", r.no, "->", r.email)
@@ -621,7 +669,7 @@ app.get("/api/requests.xlsx", hrOnly, async (c) => {
   const lines = ids.length ? await sql`SELECT * FROM uni_request_lines WHERE request_id IN ${sql(ids)} ORDER BY id` : []
   const origin = new URL(c.req.url).origin.replace(/^http:/, c.req.header("x-forwarded-proto") === "https" ? "https:" : "http:")
   const STATUS: Record<string, string> = { pending: "รออนุมัติ", approved: "อนุมัติแล้ว · รอดำเนินการจัดส่ง", shipped: "จัดส่งแล้ว", rejected: "ไม่อนุมัติ", cancelled: "ยกเลิก" }
-  const items = (r: any) => lines.filter((l: any) => l.request_id === r.id).map((l: any) => `${l.product_name} ${[l.size, l.color].filter(Boolean).join("/")} × ${l.qty}`).join(", ")
+  const items = (r: any) => lines.filter((l: any) => l.request_id === r.id).map((l: any) => `${l.product_name} ${[l.size, l.color].filter(Boolean).join("/")} × ${l.qty}`).join(", ") || `${r.type} × ${r.total_qty}`
   const d = (v: any) => (v ? new Date(v) : null)
   const wb = new ExcelJS.Workbook()
   wb.creator = "Uniform Stock"
@@ -629,13 +677,13 @@ app.get("/api/requests.xlsx", hrOnly, async (c) => {
     { header: "เลขที่คำขอ", key: "no", width: 18 }, { header: "วันที่ขอ", key: "created", width: 12, style: { numFmt: "dd/mm/yyyy" } },
     { header: "ชื่อ-นามสกุล", key: "name", width: 24 }, { header: "รหัสพนักงาน", key: "emp", width: 12 }, { header: "ตำแหน่ง", key: "pos", width: 18 },
     { header: "แผนก", key: "dept", width: 16 }, { header: "สาขา", key: "branch", width: 16 }, { header: "โทร", key: "phone", width: 13 }, { header: "อีเมล", key: "email", width: 26 },
-    ...(purchase ? [] : [{ header: "ประเภทการเบิก", key: "type", width: 30 }]),
+    { header: "ประเภทการเบิก", key: "type", width: 30 },
     { header: "รายการ (ไซส์ × จำนวน)", key: "items", width: 40 }, { header: "จำนวนรวม (ตัว)", key: "qty", width: 12 },
     ...(purchase ? [{ header: "ยอดชำระ (บาท)", key: "amount", width: 13, style: { numFmt: "#,##0" } }, { header: "หลักฐานการชำระเงิน", key: "slip", width: 20 }] : []),
     { header: "สถานะ", key: "status", width: 26 }, { header: "เลขใบส่งสินค้า", key: "dn", width: 16 },
     { header: "วันที่จัดส่ง", key: "shipped", width: 12, style: { numFmt: "dd/mm/yyyy" } }, { header: "แจ้งอีเมลแล้ว", key: "notified", width: 12 }, { header: "หมายเหตุ", key: "note", width: 24 },
   ]
-  for (const [title, purchase] of [["สั่งซื้อเสื้อเพิ่ม", true], ["คำขอทั้งหมด", false]] as const) {
+  for (const [title, purchase] of [["รายการที่ต้องชำระเงิน", true], ["คำขอทั้งหมด", false]] as const) {
     const ws = wb.addWorksheet(title, { views: [{ state: "frozen", ySplit: 1 }] })
     ws.columns = cols(purchase) as any
     for (const r of rows.filter((x: any) => !purchase || x.kind === "purchase")) {
@@ -742,7 +790,7 @@ app.get("/dn/:no", async (c) => {
   if (!r || (me.role !== "hr" && r.requester_id !== me.id)) return c.text("ไม่พบใบส่งสินค้า", 404)
   const lines = await sql`SELECT * FROM uni_request_lines WHERE request_id = ${r.id} ORDER BY id`
   const s = await getSettings()
-  const total = lines.reduce((t: number, l: any) => t + l.qty, 0)
+  const total = lines.length ? lines.reduce((t: number, l: any) => t + l.qty, 0) : r.total_qty
   return c.html(`<!doctype html><html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(r.dn_no)} — ใบส่งสินค้า</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
@@ -775,7 +823,8 @@ app.get("/dn/:no", async (c) => {
     <div class="box"><b>จัดส่งที่</b>สาขา ${esc(r.branch)}${r.note ? `<br>หมายเหตุ: ${esc(r.note)}` : ""}</div>
   </div>
   <table class="items"><thead><tr><th style="width:44px">ลำดับ</th><th>SKU</th><th>รายการ</th><th>ไซส์</th><th>สี</th><th style="width:90px">จำนวน</th></tr></thead><tbody>
-  ${lines.map((l: any, i: number) => `<tr><td class="c">${i + 1}</td><td>${esc(l.sku)}</td><td>${esc(l.product_name)}</td><td class="c">${esc(l.size)}</td><td class="c">${esc(l.color)}</td><td class="n">${l.qty} ${esc(l.unit)}</td></tr>`).join("")}
+  ${lines.length ? lines.map((l: any, i: number) => `<tr><td class="c">${i + 1}</td><td>${esc(l.sku)}</td><td>${esc(l.product_name)}</td><td class="c">${esc(l.size)}</td><td class="c">${esc(l.color)}</td><td class="n">${l.qty} ${esc(l.unit)}</td></tr>`).join("")
+    : `<tr><td class="c">1</td><td>—</td><td>${esc(r.type)}</td><td class="c"></td><td class="c"></td><td class="n">${r.total_qty}</td></tr>`}
   <tr><td colspan="5" class="n"><b>รวม</b></td><td class="n"><b>${total}</b></td></tr></tbody></table>
   <div class="sign">
     <div><div class="line">ผู้อนุมัติ (HR)</div><div class="muted">${esc(r.approver_name || "")}</div><div class="muted">วันที่ ${esc(thaiDate(r.approved_at))}</div></div>

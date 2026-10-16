@@ -124,17 +124,22 @@
       if (filter && !p.variants.some(function (v) { return v.status === filter; })) return false;
       return true;
     });
-    setView('<div class="row"><div><h1>สต๊อกชุดยูนิฟอร์ม</h1><p class="sub">ยอดคงเหลือแยกตาม SKU (ไซส์ × สี) — กดที่สินค้าเพื่อดูความเคลื่อนไหว</p></div><div class="spacer"></div><button class="btn" id="add">+ เพิ่มสินค้า</button></div>' +
+    setView('<div class="row"><div><h1>สต๊อก</h1><p class="sub">ยอดคงเหลือแยกตาม SKU — กดชื่อสินค้าเพื่อดูความเคลื่อนไหว / แก้ไขสินค้า</p></div><div class="spacer"></div><button class="btn" id="add">+ เพิ่มสินค้า</button></div>' +
       '<div class="summary">' + cards.map(function (c) { return '<button class="sum ' + c[0] + (filter === c[0] && (c[0] || !filter) ? " on" : "") + '" data-f="' + c[0] + '"><b>' + c[2] + "</b><span>" + c[1] + "</span></button>"; }).join("") + "</div>" +
       '<div class="card" style="padding:12px 14px"><input class="i" id="search" placeholder="ค้นหาชื่อสินค้า รหัสสินค้า หรือ SKU" value="' + esc(q.s || "") + '"></div>' +
-      (list.length ? '<div class="products">' + list.map(function (p) {
+      // Table: one header row per product, then one row per SKU (filter applies to SKUs).
+      (list.length ? '<div class="card" style="padding:6px 8px"><div class="scroll"><table class="t stock"><thead><tr><th>สินค้า / SKU</th><th>ไซส์</th><th>รอบอก</th><th>สี</th><th class="n">คงเหลือ</th><th>สถานะ</th><th></th></tr></thead><tbody>' + list.map(function (p) {
         var vs = filter ? p.variants.filter(function (v) { return v.status === filter; }) : p.variants;
-        return '<div class="prod" data-id="' + p.id + '"><div class="total"><b>' + p.total + "</b>" + esc(p.unit) + "คงเหลือ</div><h3>" + esc(p.name) + '</h3><div class="meta">' + esc(p.code) + (p.category ? " · " + esc(p.category) : "") + " · ใกล้หมดเมื่อ ≤ " + p.min + '</div><div class="chips">' +
-          vs.map(function (v) { return '<span class="chip ' + v.status + '" title="' + esc(v.sku) + " · " + STATUS[v.status] + (v.chest ? " · รอบอก " + esc(v.chest) : "") + '">' + esc([v.size, v.color].filter(Boolean).join(" / ") || v.sku) + " · " + v.qty + "</span>"; }).join("") + "</div></div>";
-      }).join("") + "</div>" : '<div class="card empty">' + (data.products.length ? "ไม่พบสินค้าที่ตรงกับเงื่อนไข" : "ยังไม่มีสินค้า — กด \"+ เพิ่มสินค้า\" เพื่อเริ่มต้น") + "</div>"));
+        return '<tr class="pgroup"><td colspan="4"><a href="#/stock/' + p.id + '"><b>' + esc(p.name) + '</b></a> <span class="muted small">' + esc(p.code) + (p.category ? " · " + esc(p.category) : "") + " · ใกล้หมดเมื่อ ≤ " + p.min + '</span></td><td class="n"><b>' + p.total + '</b> <span class="muted small">' + esc(p.unit) + '</span></td><td></td><td class="right nowrap"><a class="btn sm ghost" href="#/stock/' + p.id + '">ความเคลื่อนไหว</a></td></tr>' +
+          vs.map(function (v) {
+            return '<tr><td class="sku">' + esc(v.sku) + "</td><td>" + esc(v.size) + "</td><td>" + esc(v.chest || "") + "</td><td>" + esc(v.color) + '</td><td class="n"><b>' + v.qty + '</b></td><td><span class="badge ' + v.status + '">' + STATUS[v.status] + '</span></td><td class="right nowrap"><button class="btn sm" data-in="' + p.id + ":" + v.id + '">รับเข้า</button> <button class="btn sm ghost" data-adj="' + p.id + ":" + v.id + '">ปรับยอด</button></td></tr>';
+          }).join("");
+      }).join("") + "</tbody></table></div></div>" : '<div class="card empty">' + (data.products.length ? "ไม่พบสินค้าที่ตรงกับเงื่อนไข" : "ยังไม่มีสินค้า — กด \"+ เพิ่มสินค้า\" เพื่อเริ่มต้น") + "</div>"));
     $$(".sum").forEach(function (b) { b.onclick = function () { nav("#/stock", { f: b.dataset.f, s: $("#search").value }); }; });
     $("#search").addEventListener("input", debounce(function () { nav("#/stock", { f: filter, s: $("#search").value }, true); }, 300));
-    $$(".prod").forEach(function (el) { el.onclick = function () { location.hash = "#/stock/" + el.dataset.id; }; });
+    function pv(key) { var k = key.split(":"), p = data.products.find(function (x) { return x.id == k[0]; }); return [p, p.variants.find(function (v) { return v.id == k[1]; })]; }
+    $$("[data-in]").forEach(function (b) { b.onclick = function () { var x = pv(b.dataset.in); qtyDialog("in", x[0], x[1]); }; });
+    $$("[data-adj]").forEach(function (b) { b.onclick = function () { var x = pv(b.dataset.adj); qtyDialog("adj", x[0], x[1]); }; });
     $("#add").onclick = function () { productEditor(null); };
     if (q.s) { var si = $("#search"); si.focus(); si.setSelectionRange(si.value.length, si.value.length); }
   }
@@ -257,8 +262,12 @@
     var branchInput = s.branches.length ? dropdown("branch", s.branches, pick("branch", me.branch), "เลือกสาขา") : '<input class="i" id="branch" value="' + v("branch", me.branch) + '">';
     var posInput = (s.positions || []).length ? dropdown("position", s.positions, pick("position", me.position), "เลือกตำแหน่ง") : '<input class="i" id="position" placeholder="พิมพ์ตำแหน่ง" value="' + v("position", me.position) + '">';
     var deptInput = s.depts.length ? dropdown("dept", s.depts, pick("dept", me.dept), "เลือกแผนก") : '<input class="i" id="dept" value="' + v("dept", me.dept) + '">';
-    setView('<h1>ขอเบิก / สั่งซื้อเสื้อยูนิฟอร์ม</h1><p class="sub">กรอกข้อมูลแล้วกดส่ง — HR จะตรวจสอบสต๊อกและอนุมัติ แล้วจัดส่งไปยังสาขาที่เลือก พร้อมแจ้งทางอีเมล</p>' +
-      (cat.length ? "" : '<div class="card note red">ยังไม่มีรายการเสื้อในระบบ — กรุณาติดต่อ HR</div>') +
+    // Products linked to lanyard / card holder / ID card are not shirts.
+    var linkedIds = Object.keys(s.itemProducts || {}).map(function (k) { return s.itemProducts[k]; }).filter(function (x) { return x; });
+    var allProducts = cat, shirts = cat.filter(function (p) { return linkedIds.indexOf(p.id) === -1; });
+    function itemProduct(t) { var id = t && t.item !== "shirt" ? (s.itemProducts || {})[t.item] : null; return id ? allProducts.find(function (p) { return p.id === id; }) || null : null; }
+    function amountFor(t, n) { return !t ? 0 : t.item === "shirt" ? (t.purchase ? priceFor(n) : 0) : n * (t.price || 0); }
+    setView('<h1>ขอเบิก / สั่งซื้อ</h1><p class="sub">เสื้อยูนิฟอร์ม · สายคล้องคอ · กรอบบัตร · บัตรพนักงาน — กรอกข้อมูลแล้วกดส่ง HR จะตรวจสอบและอนุมัติ แล้วจัดส่งไปยังสาขาที่เลือก พร้อมแจ้งทางอีเมล</p>' +
       '<div class="card"><h3 style="margin-top:0">ข้อมูลพนักงาน</h3><div class="grid3">' +
       field("วันที่ขอ", '<input class="i" type="date" id="reqDate" value="' + today() + '">', true) +
       field("ชื่อ-นามสกุล", '<input class="i" id="name" value="' + v("name", me.name) + '">', true) +
@@ -268,15 +277,16 @@
       field("สาขา", branchInput, true) +
       field("เบอร์โทรติดต่อ", '<input class="i" id="phone" inputmode="tel" value="' + v("phone", me.phone) + '">', false) +
       field("อีเมล (แจ้งเมื่อจัดส่งแล้ว)", '<input class="i" id="email" type="email" inputmode="email" placeholder="name@example.com" value="' + v("email", me.email) + '">', true) +
-      field("ประเภทการเบิก", '<select class="i" id="type"><option value="">-- เลือกประเภท --</option>' + s.requestTypes.map(function (t) { return '<option value="' + esc(t.label) + '">' + esc(t.label) + "</option>"; }).join("") + "</select>", true) +
+      field("ประเภทการเบิก", '<select class="i" id="type"><option value="">-- เลือกประเภท --</option>' + s.requestTypes.map(function (t) { return '<option value="' + esc(t.label) + '">' + esc(t.label) + (t.item !== "shirt" ? " — " + (t.price ? money(t.price) + " บาท" : "ไม่มีค่าใช้จ่าย") : "") + "</option>"; }).join("") + "</select>", true) +
       "</div></div>" +
-      '<div class="card"><h3 style="margin-top:0">รายละเอียดเสื้อยูนิฟอร์ม</h3><p class="small muted" id="typeHint" style="margin:-4px 0 10px">เลือกประเภทการเบิกก่อน</p>' +
-      '<div id="lines"></div><button class="btn sm ghost" id="addLine">+ เพิ่มไซส์</button>' +
+      '<div class="card"><h3 style="margin-top:0" id="itemTitle">รายละเอียดรายการ</h3><p class="small muted" id="typeHint" style="margin:-4px 0 10px">เลือกประเภทการเบิกก่อน</p>' +
+      '<div id="shirtBlock">' + (shirts.length ? "" : '<div class="note red">ยังไม่มีรายการเสื้อในระบบ — กรุณาติดต่อ HR</div>') + '<div id="lines"></div><button class="btn sm ghost" id="addLine">+ เพิ่มไซส์</button></div>' +
+      '<div id="itemBlock" hidden><div class="lrow item"><div class="i prname" id="itemName"></div><select class="i" id="itemSku" hidden></select><input class="i" id="itemQty" type="number" min="1" max="99" step="1" value="1" aria-label="จำนวน"></div></div>' +
       '<div class="totalbox" id="totalBox"></div>' +
       '<div class="field" style="margin-top:14px"><label class="f">หมายเหตุ</label><textarea class="i" id="note" rows="2"></textarea></div>' +
       '<div class="err" id="err"></div><button class="btn" id="submit">ส่งคำขอเบิก</button></div>');
     var lines = $("#lines");
-    var single = cat.length === 1 ? cat[0] : null;
+    var single = shirts.length === 1 ? shirts[0] : null; cat = shirts;   // the size lines list shirts only
     function sizeOptions(p) { return '<option value="">-- เลือกไซส์ (รอบอก) --</option>' + p.variants.map(function (x) { return '<option value="' + x.id + '">' + esc(vlabel(x)) + "</option>"; }).join(""); }
     function addLine() {
       var div = document.createElement("div"); div.className = "lrow";
@@ -291,11 +301,29 @@
       $(".x", div).onclick = function () { div.remove(); if (!lines.children.length) addLine(); update(); };
       lines.appendChild(div);
     }
-    function collect() { return $$(".lrow").map(function (r) { return { variant_id: $(".va", r).value, qty: $(".qt", r).value }; }).filter(function (l) { return l.variant_id; }); }
-    function totalQty() { return collect().reduce(function (a, l) { return a + (Number(l.qty) || 0); }, 0); }
+    function isItem() { var t = typeOf($("#type").value); return !!t && t.item !== "shirt"; }
+    function collect() {
+      if (isItem()) {
+        var p = itemProduct(typeOf($("#type").value)); if (!p) return [];   // service: quantity only
+        var vid = p.variants.length === 1 ? p.variants[0].id : $("#itemSku").value;
+        return vid ? [{ variant_id: vid, qty: $("#itemQty").value }] : [];
+      }
+      return $$("#lines .lrow").map(function (r) { return { variant_id: $(".va", r).value, qty: $(".qt", r).value }; }).filter(function (l) { return l.variant_id; });
+    }
+    function totalQty() { return isItem() ? (Number($("#itemQty").value) || 0) : collect().reduce(function (a, l) { return a + (Number(l.qty) || 0); }, 0); }
     function update() {
       var t = typeOf($("#type").value), n = totalQty(), box = $("#totalBox");
-      if (!t) { $("#typeHint").textContent = "เลือกประเภทการเบิกก่อน"; box.innerHTML = ""; $("#submit").textContent = "ส่งคำขอเบิก"; return; }
+      $("#shirtBlock").hidden = !!(t && t.item !== "shirt"); $("#itemBlock").hidden = !(t && t.item !== "shirt");
+      if (!t) { $("#typeHint").textContent = "เลือกประเภทการเบิกก่อน"; $("#itemTitle").textContent = "รายละเอียดรายการ"; box.innerHTML = ""; $("#submit").textContent = "ส่งคำขอเบิก"; return; }
+      if (t.item !== "shirt") {
+        var amt = amountFor(t, n), ip = itemProduct(t);
+        $("#itemTitle").textContent = "รายละเอียด: " + t.label;
+        $("#typeHint").textContent = t.price ? "ราคา " + money(t.price) + " บาท / ชิ้น — ระบุจำนวน ระบบคำนวณยอดชำระให้" : "ไม่มีค่าใช้จ่าย — ระบุจำนวน";
+        box.innerHTML = n > 0 ? 'จำนวน <b>' + n + '</b>' + (amt ? ' · ยอดชำระ <b class="amt">' + money(amt) + ' บาท</b>' : " · ไม่มีค่าใช้จ่าย") : "ระบุจำนวน";
+        $("#submit").textContent = amt > 0 ? "ถัดไป: ชำระเงิน →" : "ส่งคำขอเบิก";
+        return;
+      }
+      $("#itemTitle").textContent = "รายละเอียดเสื้อยูนิฟอร์ม";
       if (t.purchase) {
         $("#typeHint").textContent = "ระบุไซส์และจำนวนเสื้อที่ต้องการสั่งซื้อ — ระบบคำนวณยอดชำระให้อัตโนมัติ";
         box.innerHTML = n > 0 ? 'สั่งซื้อ <b>' + n + '</b> ตัว · ยอดชำระ <b class="amt">' + money(priceFor(n)) + ' บาท</b>' : "ระบุจำนวนเสื้อที่ต้องการสั่งซื้อ";
@@ -308,14 +336,22 @@
     }
     addLine(); update();
     $("#addLine").onclick = function () { addLine(); update(); };
+    $("#itemQty").oninput = update; $("#itemSku").onchange = update;
     $("#type").onchange = function () {
       var t = typeOf(this.value);
+      if (t && t.item !== "shirt") {
+        var ip = itemProduct(t);
+        $("#itemName").textContent = ip ? ip.name : t.label;
+        var sku = $("#itemSku"); sku.hidden = !(ip && ip.variants.length > 1);
+        sku.innerHTML = ip && ip.variants.length > 1 ? '<option value="">-- เลือกแบบ --</option>' + ip.variants.map(function (x) { return '<option value="' + x.id + '">' + esc(vlabel(x)) + "</option>"; }).join("") : "";
+        $("#itemQty").value = 1;
+      }
       // One size line with the entitled quantity is the common case — prefill it.
       if (t && t.qty && $$(".lrow").length === 1) $(".qt", lines.children[0]).value = t.qty;
       update();
     };
     function body() {
-      return { req_date: $("#reqDate").value, name: $("#name").value, emp_code: $("#code").value, position: $("#position").value, dept: $("#dept").value, phone: $("#phone").value, email: $("#email").value.trim(), branch: $("#branch").value, type: $("#type").value, note: $("#note").value, lines: collect() };
+      return { req_date: $("#reqDate").value, name: $("#name").value, emp_code: $("#code").value, position: $("#position").value, dept: $("#dept").value, phone: $("#phone").value, email: $("#email").value.trim(), branch: $("#branch").value, type: $("#type").value, note: $("#note").value, lines: collect(), qty: totalQty() };
     }
     function remember(b) {
       try { localStorage.setItem("uni_last_form", JSON.stringify({ name: b.name, position: b.position, dept: b.dept, phone: b.phone, email: b.email, branch: b.branch })); } catch (e) {}
@@ -331,25 +367,28 @@
       if (!b.name.trim()) missing.push("ชื่อ-นามสกุล"); if (!b.emp_code.trim()) missing.push("รหัสพนักงาน"); if (!b.position.trim()) missing.push("ตำแหน่ง");
       if (s.depts.length && !b.dept) missing.push("แผนก"); if (!b.branch.trim()) missing.push("สาขา");
       if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(b.email)) missing.push("อีเมล");
-      if (!t) missing.push("ประเภทการเบิก"); if (!b.lines.length) missing.push("ไซส์และจำนวนเสื้อ");
+      if (!t) missing.push("ประเภทการเบิก");
+      else if (t.item === "shirt" && !b.lines.length) missing.push("ไซส์และจำนวนเสื้อ");
+      else if (t.item !== "shirt" && itemProduct(t) && !b.lines.length) missing.push("แบบของ " + t.label);
+      else if (t.item !== "shirt" && !(b.qty >= 1 && b.qty <= 99)) missing.push("จำนวน (1–99)");
       if (missing.length) { $("#err").textContent = "กรุณากรอก: " + missing.join(", "); return; }
       var n = totalQty();
       if (t.qty && n !== t.qty) { $("#err").textContent = "ประเภทนี้เบิกได้ " + t.qty + " ตัว (ตอนนี้เลือก " + n + " ตัว)"; return; }
       $("#err").textContent = "";
-      if (t.purchase) return paymentStep(b, n);
+      if (amountFor(t, n) > 0) return paymentStep(b, n, t);
       busy(this, true);
       try { var r = await api("/api/requests", { method: "POST", body: b }); remember(b); done(r.no, false); }
       catch (e) { $("#err").textContent = e.message; busy(this, false); }
     };
     // Step 2 for purchases: amount, how to pay, "ask HR first", payment slip.
-    function paymentStep(b, n) {
-      var amount = priceFor(n);
-      var items = b.lines.map(function (l) { var x = null; cat.forEach(function (p) { p.variants.forEach(function (vv) { if (String(vv.id) === String(l.variant_id)) x = { p: p, v: vv }; }); }); return x ? esc(x.p.name) + " · " + esc(vlabel(x.v)) + " × " + Number(l.qty) : ""; }).join("<br>");
-      var mb = modal('<h2>ชำระเงิน — สั่งซื้อเสื้อเพิ่ม</h2>' +
-        '<div class="paybox"><div>' + items + '</div><div class="payamt">ยอดชำระ <b>' + money(amount) + ' บาท</b><span class="muted small">(' + n + ' ตัว)</span></div></div>' +
-        '<div class="note red"><b>ก่อนชำระเงิน</b> กรุณาสอบถาม HR เพื่อตรวจสอบจำนวนเสื้อคงเหลือและไซซ์ที่ต้องการก่อน</div>' +
+    function paymentStep(b, n, t) {
+      var amount = amountFor(t, n), shirt = t.item === "shirt";
+      var items = b.lines.length ? b.lines.map(function (l) { var x = null; allProducts.forEach(function (p) { p.variants.forEach(function (vv) { if (String(vv.id) === String(l.variant_id)) x = { p: p, v: vv }; }); }); return x ? esc(x.p.name) + (x.p.variants.length > 1 || shirt ? " · " + esc(vlabel(x.v)) : "") + " × " + Number(l.qty) : ""; }).join("<br>") : esc(t.label) + " × " + n;
+      var mb = modal('<h2>ชำระเงิน — ' + esc(t.label) + '</h2>' +
+        '<div class="paybox"><div>' + items + '</div><div class="payamt">ยอดชำระ <b>' + money(amount) + ' บาท</b><span class="muted small">(' + n + (shirt ? " ตัว" : " ชิ้น") + ')</span></div></div>' +
+        '<div class="note red"><b>ก่อนชำระเงิน</b> กรุณาสอบถาม HR เพื่อตรวจสอบจำนวนคงเหลือ' + (shirt ? "และไซซ์ที่ต้องการ" : "") + 'ก่อน</div>' +
         (s.payInfo ? '<div class="note"><b>ช่องทางการชำระเงิน</b><br>' + esc(s.payInfo).replace(/\n/g, "<br>") + "</div>" : '<div class="note">สอบถามช่องทางการชำระเงินกับ HR</div>') +
-        '<label class="ack"><input type="checkbox" id="ack"> สอบถาม HR เรื่องจำนวนเสื้อคงเหลือและไซซ์แล้ว</label>' +
+        '<label class="ack"><input type="checkbox" id="ack"> สอบถาม HR เรื่องจำนวนคงเหลือ' + (shirt ? "และไซซ์" : "") + 'แล้ว</label>' +
         field("แนบหลักฐานการชำระเงิน (รูปภาพ หรือ PDF)", '<input class="i" type="file" id="slip" accept="image/*,application/pdf">', true) + '<div id="slipPrev"></div>' +
         '<div class="err" id="perr"></div><div class="actions"><button class="btn ghost" id="back">← แก้ไขรายการ</button><button class="btn" id="pay">ส่งคำสั่งซื้อ</button></div>');
       var file = null;
@@ -420,7 +459,8 @@
   function reqCard(r) {
     var hr = isHR(), pend = r.status === "pending";
     var lines = '<div class="scroll"><table class="t lines"><thead><tr><th>รายการ</th><th>SKU</th><th>ไซส์ / สี</th><th class="n">จำนวน</th>' + (hr && pend ? '<th class="n">คงเหลือ</th>' : "") + "</tr></thead><tbody>" +
-      r.lines.map(function (l) { return "<tr><td>" + esc(l.product_name) + "</td><td>" + esc(l.sku) + "</td><td>" + esc([l.size, l.color].filter(Boolean).join(" / ")) + '</td><td class="n">' + l.qty + " " + esc(l.unit) + "</td>" + (hr && pend ? '<td class="n' + (l.available < l.qty ? " short" : "") + '">' + l.available + "</td>" : "") + "</tr>"; }).join("") + "</tbody></table></div>";
+      (r.lines.length ? r.lines.map(function (l) { return "<tr><td>" + esc(l.product_name) + "</td><td>" + esc(l.sku) + "</td><td>" + esc([l.size, l.color].filter(Boolean).join(" / ")) + '</td><td class="n">' + l.qty + " " + esc(l.unit) + "</td>" + (hr && pend ? '<td class="n' + (l.available < l.qty ? " short" : "") + '">' + l.available + "</td>" : "") + "</tr>"; }).join("")
+        : "<tr><td>" + esc(r.type) + '</td><td class="muted">ไม่ตัดสต๊อก</td><td></td><td class="n">' + r.total_qty + "</td>" + (hr && pend ? "<td></td>" : "") + "</tr>") + "</tbody></table></div>";
     var acts = [];
     if (pend && hr) { acts.push('<button class="btn sm" data-act="approve" data-no="' + esc(r.no) + '">อนุมัติและออกใบส่งสินค้า</button>'); acts.push('<button class="btn sm danger" data-act="reject" data-no="' + esc(r.no) + '">ไม่อนุมัติ</button>'); }
     if (pend && r.mine) acts.push('<button class="btn sm ghost" data-act="cancel" data-no="' + esc(r.no) + '">ยกเลิกคำขอ</button>');
@@ -505,8 +545,13 @@
   }
 
   // ---------- settings (HR) ----------
-  function viewSettings() {
-    var s = state.settings;
+  async function viewSettings() {
+    var s = state.settings, products = await api("/api/catalog");
+    var priceRows = s.requestTypes.filter(function (t) { return t.priceKey; });
+    var linkSel = function (key, label) {
+      var cur = (s.itemProducts || {})[key];
+      return field(label, '<select class="i" data-link="' + key + '"><option value="">— ไม่ตัดสต๊อก —</option>' + products.map(function (p) { return '<option value="' + p.id + '"' + (cur === p.id ? " selected" : "") + ">" + esc(p.name) + " (" + esc(p.code) + ")</option>"; }).join("") + "</select>", false);
+    };
     setView('<h1>ตั้งค่า</h1><p class="sub">ข้อมูลที่ใช้ในแบบฟอร์มขอเบิกและใบส่งสินค้า</p><div class="card">' +
       field("ชื่อหน่วยงานบนใบส่งสินค้า", '<input class="i" id="co" value="' + esc(s.company) + '" placeholder="เช่น บริษัท ตัวอย่าง จำกัด — ฝ่ายทรัพยากรบุคคล">', false) +
       '<p class="small muted">รายชื่อด้านล่างจะแสดงเป็น Dropdown ในแบบฟอร์มของพนักงาน (ถ้าเว้นว่าง จะให้พิมพ์เอง)</p>' +
@@ -516,10 +561,20 @@
       '<h3>สั่งซื้อเสื้อเพิ่ม</h3><div class="grid2">' +
       field("ราคาตามจำนวน (บรรทัดละ จำนวน=ราคา)", '<textarea class="i" id="pt" rows="5">' + esc(s.priceTable || "") + '</textarea><p class="small muted">จำนวนที่ไม่ได้ระบุ = จำนวน × ราคาของ 1 ตัว · ตัวอย่าง: 3 ตัว = 3 × ' + money(priceFor(1)) + ' = ' + money(priceFor(3)) + " บาท</p>", true) +
       field("ช่องทางการชำระเงิน (แสดงตอนพนักงานกดชำระเงิน)", '<textarea class="i" id="pi" rows="5" placeholder="เช่น โอนเข้าบัญชี … ธนาคาร … เลขที่ … ชื่อบัญชี …">' + esc(s.payInfo || "") + "</textarea>", false) + "</div>" +
+      '<h3>สายคล้องคอ / กรอบบัตร / บัตรพนักงาน</h3>' +
+      '<p class="small muted">ราคาต่อชิ้น (0 = ไม่มีค่าใช้จ่าย ไม่ต้องชำระเงิน) และสินค้าในสต๊อกที่ใช้ตัดยอดเมื่ออนุมัติ — ถ้าไม่ผูก จะไม่ตัดสต๊อก (เช่น ออกบัตรใหม่) · สินค้าที่ผูกไว้จะไม่แสดงในรายการเสื้อ</p>' +
+      '<div class="grid2">' + priceRows.map(function (t) { return field(esc(t.label) + " (บาท / ชิ้น)", '<input class="i" type="number" min="0" step="1" data-price="' + t.priceKey + '" value="' + (t.price || 0) + '">', false); }).join("") + "</div>" +
+      '<div class="grid3">' + linkSel("lanyard", "สินค้าในสต๊อก: สายคล้องคอ") + linkSel("cardholder", "สินค้าในสต๊อก: กรอบบัตร") + linkSel("idcard", "สินค้าในสต๊อก: บัตรพนักงาน") + "</div>" +
       '<p class="small muted">อีเมลแจ้งพนักงานเมื่อจัดส่งแล้ว: ' + (s.mailEnabled ? '<span class="badge shipped">เปิดใช้งาน</span> (ส่งจาก no-reply@uficon.com)' : '<span class="badge rejected">ยังไม่ได้ตั้งค่า</span>') + "</p>" +
       '<div class="err" id="err"></div><button class="btn" id="save">บันทึกการตั้งค่า</button></div>');
     $("#save").onclick = async function () {
-      try { var r = await api("/api/settings", { method: "PUT", body: { company: $("#co").value, branches: $("#br").value, positions: $("#ps").value, depts: $("#dp").value, priceTable: $("#pt").value, payInfo: $("#pi").value } }); state.settings = Object.assign(state.settings, r); toast("บันทึกการตั้งค่าแล้ว"); viewSettings(); }
+      var prices = {}, links = {};
+      $$("[data-price]").forEach(function (i) { prices[i.dataset.price] = i.value; });
+      $$("[data-link]").forEach(function (i) { links[i.dataset.link] = i.value ? Number(i.value) : null; });
+      try {
+        await api("/api/settings", { method: "PUT", body: { company: $("#co").value, branches: $("#br").value, positions: $("#ps").value, depts: $("#dp").value, priceTable: $("#pt").value, payInfo: $("#pi").value, prices: prices, itemProducts: links } });
+        state.settings = await api("/api/settings"); toast("บันทึกการตั้งค่าแล้ว"); viewSettings();
+      }
       catch (e) { $("#err").textContent = e.message; }
     };
   }
@@ -577,7 +632,7 @@
       if (isHR()) {
         if (p === "/stock") { state.categories = (await api("/api/catalog")).map(function (x) { return x.category; }).filter(function (c, i, a) { return c && a.indexOf(c) === i; }); return await viewStock(r.q); }
         var m = p.match(/^\/stock\/(\d+)$/); if (m) return await viewProduct(m[1], r.q);
-        if (p === "/settings") return viewSettings();
+        if (p === "/settings") return await viewSettings();
         if (p === "/users") return await viewUsers();
       }
       setView('<div class="card empty">ไม่พบหน้านี้ หรือไม่มีสิทธิ์เข้าถึง</div>');

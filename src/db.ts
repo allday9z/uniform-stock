@@ -10,7 +10,7 @@
 import postgres from "postgres"
 
 export const sql = postgres(process.env.DATABASE_URL ?? "postgres://postgres:postgres@localhost:5432/postgres", {
-  max: 10,
+  max: Number(process.env.PG_MAX ?? 10),   // PG_MAX=1 for single-connection test databases
   onnotice: () => {},
 })
 
