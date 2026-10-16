@@ -12,8 +12,10 @@
 import { Hono } from "hono"
 import { getCookie, setCookie, deleteCookie } from "hono/cookie"
 import { sql, initDB, nextNo, thaiDateStamp } from "./db"
+import { sendMail, shippedEmail, mailEnabled } from "./mail"
+import ExcelJS from "exceljs"
 
-type User = { id: number; emp_code: string; name: string; role: "hr" | "employee"; phone: string | null; position: string | null; dept: string | null; branch: string | null }
+type User = { id: number; emp_code: string; name: string; role: "hr" | "employee"; phone: string | null; email: string | null; position: string | null; dept: string | null; branch: string | null }
 type Env = { Variables: { user: User | null } }
 
 const app = new Hono<Env>()
@@ -21,7 +23,29 @@ const PORT = Number(process.env.PORT ?? 3000)
 const COOKIE = "uni_session"
 const SESSION_DAYS = 30
 const HR_SETUP_CODE = process.env.HR_SETUP_CODE ?? ""
-const REQUEST_TYPES = ["พนักงานใหม่", "เบิกเปลี่ยนตามรอบ", "ชำรุด-สูญหาย", "เปลี่ยนไซส์", "อื่นๆ"]
+// Request types (HR spec, Oct 2026): a fixed number of shirts per type, or an
+// employee purchase (any number, paid — amount from the price table in settings).
+type RequestType = { label: string; qty?: number; purchase?: boolean }
+const REQUEST_TYPES: RequestType[] = [
+  { label: "พนักงานใหม่ (2 ตัว)", qty: 2 },
+  { label: "พนักงานใหม่ (1 ตัว สำหรับพนักงาน HO)", qty: 1 },
+  { label: "พนักงานผ่านทดลองงาน (3 ตัว)", qty: 3 },
+  { label: "พนักงานต่อสัญญาจ้าง (3 ตัว)", qty: 3 },
+  { label: "พนักงานต้องการซื้อเสื้อเพิ่ม", purchase: true },
+]
+const MAX_SLIP_BYTES = 6 * 1024 * 1024
+const SLIP_TYPES = ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "application/pdf"]
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
+// The file name decides File.type, so check the actual bytes — and store the sniffed type.
+function sniffSlip(b: Uint8Array): string | null {
+  const at = (i: number, ...v: number[]) => v.every((x, k) => b[i + k] === x)
+  if (at(0, 0xff, 0xd8, 0xff)) return "image/jpeg"
+  if (at(0, 0x89, 0x50, 0x4e, 0x47)) return "image/png"
+  if (at(0, 0x52, 0x49, 0x46, 0x46) && at(8, 0x57, 0x45, 0x42, 0x50)) return "image/webp"
+  if (at(0, 0x25, 0x50, 0x44, 0x46)) return "application/pdf"
+  if (at(4, 0x66, 0x74, 0x79, 0x70) && /^(heic|heix|hevc|mif1|msf1|heif)/.test(String.fromCharCode(...b.slice(8, 12)))) return "image/heic"
+  return null
+}
 
 // ---------- helpers ----------
 const str = (v: any, max = 200) => String(v ?? "").trim().slice(0, max)
@@ -56,7 +80,7 @@ app.use("*", async (c, next) => {
   const token = getCookie(c, COOKIE)
   if (token) {
     const [u] = await sql`
-      SELECT u.id, u.emp_code, u.name, u.role, u.phone, u.position, u.dept, u.branch
+      SELECT u.id, u.emp_code, u.name, u.role, u.phone, u.email, u.position, u.dept, u.branch
       FROM uni_sessions s JOIN uni_users u ON u.id = s.user_id
       WHERE s.token = ${token} AND s.expires_at > NOW() AND NOT u.disabled`
     if (u) c.set("user", u as User)
@@ -157,23 +181,47 @@ app.use("/api/*", async (c, next) => {
 const hrOnly = async (c: any, next: any) => { if (!isHR(c)) return bad(c, "forbidden", 403); await next() }
 
 // ---------- settings ----------
-async function getSettings(): Promise<{ company: string; branches: string[]; depts: string[] }> {
+type Settings = { company: string; branches: string[]; depts: string[]; positions: string[]; priceTable: string; payInfo: string }
+// priceTable: one "จำนวน=ราคา" per line; quantities not listed = qty × price of 1 shirt.
+const DEFAULT_PRICE_TABLE = "1=230\n2=480"
+async function getSettings(): Promise<Settings> {
   const [r] = await sql`SELECT value FROM uni_settings WHERE key = 'main'`
-  return { company: "", branches: [], depts: [], ...(r?.value ?? {}) }
+  return { company: "", branches: [], depts: [], positions: [], priceTable: DEFAULT_PRICE_TABLE, payInfo: "", ...(r?.value ?? {}) }
 }
-app.get("/api/settings", async (c) => c.json({ ...(await getSettings()), requestTypes: REQUEST_TYPES }))
+function parsePriceTable(text: string): Map<number, number> {
+  const m = new Map<number, number>()
+  for (const line of String(text ?? "").split("\n")) {
+    const g = line.match(/^\s*(\d+)\s*[=:]\s*(\d+)\s*$/)
+    if (g && Number(g[1]) > 0) m.set(Number(g[1]), Number(g[2]))
+  }
+  return m
+}
+function priceFor(qty: number, s: Settings): number {
+  const t = parsePriceTable(s.priceTable)
+  if (t.has(qty)) return t.get(qty)!
+  return qty * (t.get(1) ?? 230)
+}
+app.get("/api/settings", async (c) => c.json({ ...(await getSettings()), requestTypes: REQUEST_TYPES, mailEnabled }))
 app.put("/api/settings", hrOnly, async (c) => {
   const b = await c.req.json().catch(() => ({}))
   const list = (v: any) => (Array.isArray(v) ? v : String(v ?? "").split("\n")).map((s: any) => str(s, 100)).filter(Boolean).filter((s: string, i: number, a: string[]) => a.indexOf(s) === i).slice(0, 300)
-  const value = { company: str(b.company, 200), branches: list(b.branches), depts: list(b.depts) }
+  const priceTable = String(b.priceTable ?? "").split("\n").map((l) => l.trim()).filter(Boolean)
+  for (const l of priceTable) if (!/^\d+\s*[=:]\s*\d+$/.test(l)) return bad(c, `ราคาตามจำนวนไม่ถูกต้อง: "${l}" (ใช้รูปแบบ จำนวน=ราคา เช่น 1=230)`)
+  if (!parsePriceTable(priceTable.join("\n")).has(1)) return bad(c, "ราคาตามจำนวนต้องมีราคาของ 1 ตัว (เช่น 1=230)")
+  const value: Settings = { company: str(b.company, 200), branches: list(b.branches), depts: list(b.depts), positions: list(b.positions), priceTable: priceTable.join("\n"), payInfo: str(b.payInfo, 1000) }
   await sql`UPDATE uni_settings SET value = ${sql.json(value)} WHERE key = 'main'`
   return c.json(value)
+})
+app.get("/api/price", async (c) => {
+  const q = int(c.req.query("qty"))
+  if (!Number.isInteger(q) || q < 1 || q > 999) return bad(c, "จำนวนไม่ถูกต้อง")
+  return c.json({ qty: q, amount: priceFor(q, await getSettings()) })
 })
 
 // ---------- catalog (everyone) — NO qty / status / min ----------
 app.get("/api/catalog", async (c) => {
   const products = await sql`SELECT id, name, code, category, unit FROM uni_products WHERE deleted_at IS NULL ORDER BY category, name`
-  const variants = await sql`SELECT id, product_id, sku, size, color FROM uni_variants WHERE deleted_at IS NULL ORDER BY sort, id`
+  const variants = await sql`SELECT id, product_id, sku, size, color, chest FROM uni_variants WHERE deleted_at IS NULL ORDER BY sort, id`
   return c.json(products.map((p: any) => ({ ...p, variants: variants.filter((v: any) => v.product_id === p.id).map(({ product_id, ...v }: any) => v) })))
 })
 
@@ -191,7 +239,7 @@ async function productsWithStock(where?: number) {
   const ids = products.map((p: any) => p.id)
   const variants = ids.length ? await sql`SELECT * FROM uni_variants WHERE product_id IN ${sql(ids)} AND deleted_at IS NULL ORDER BY sort, id` : []
   return products.map((p: any) => {
-    const vs = variants.filter((v: any) => v.product_id === p.id).map((v: any) => ({ id: v.id, sku: v.sku, size: v.size, color: v.color, qty: v.qty, status: stockStatus(v.qty, p.min_qty) }))
+    const vs = variants.filter((v: any) => v.product_id === p.id).map((v: any) => ({ id: v.id, sku: v.sku, size: v.size, color: v.color, chest: v.chest, qty: v.qty, status: stockStatus(v.qty, p.min_qty) }))
     return { id: p.id, name: p.name, code: p.code, category: p.category, unit: p.unit, min: p.min_qty, total: vs.reduce((s: number, v: any) => s + v.qty, 0), variants: vs }
   })
 }
@@ -212,16 +260,16 @@ app.get("/api/stock/:id", async (c) => {
   return c.json({ product: p, moves: moves.slice(0, size), page, hasMore: moves.length > size })
 })
 
-type VariantIn = { id?: number; sku: string; size: string; color: string; qty?: number }
+type VariantIn = { id?: number; sku: string; size: string; color: string; chest: string; qty?: number }
 function cleanVariants(raw: any): VariantIn[] | string {
   const list = Array.isArray(raw) ? raw : []
   const out: VariantIn[] = []
   for (const r of list) {
-    const sku = str(r?.sku, 60), size = str(r?.size, 30), color = str(r?.color, 40)
+    const sku = str(r?.sku, 60), size = str(r?.size, 30), color = str(r?.color, 40), chest = str(r?.chest, 30)
     if (!sku) return "ทุก SKU ต้องมีรหัส SKU"
     const qty = r?.qty === undefined || r?.qty === "" ? 0 : int(r.qty)
     if (!Number.isInteger(qty) || qty < 0) return `ยอดตั้งต้นของ ${sku} ต้องเป็นจำนวนเต็มตั้งแต่ 0`
-    out.push({ id: r?.id ? int(r.id) : undefined, sku, size, color, qty })
+    out.push({ id: r?.id ? int(r.id) : undefined, sku, size, color, chest, qty })
   }
   const skus = out.map((v) => v.sku.toLowerCase())
   if (new Set(skus).size !== skus.length) return "มีรหัส SKU ซ้ำกัน"
@@ -251,7 +299,7 @@ app.post("/api/products", async (c) => {
       let sort = 0
       for (const v of variants) {
         if (await skuTaken(tx, v.sku)) throw new Error(`SKU ${v.sku} มีอยู่แล้วในสินค้าอื่น`)
-        const [nv] = await tx`INSERT INTO uni_variants (product_id, sku, size, color, qty, sort) VALUES (${p.id}, ${v.sku}, ${v.size}, ${v.color}, ${v.qty ?? 0}, ${sort++}) RETURNING id`
+        const [nv] = await tx`INSERT INTO uni_variants (product_id, sku, size, color, chest, qty, sort) VALUES (${p.id}, ${v.sku}, ${v.size}, ${v.color}, ${v.chest}, ${v.qty ?? 0}, ${sort++}) RETURNING id`
         if (v.qty) await tx`INSERT INTO uni_moves (product_id, variant_id, product_name, sku, size, color, type, qty, balance, ref, who, by_user)
           VALUES (${p.id}, ${nv.id}, ${name}, ${v.sku}, ${v.size}, ${v.color}, 'in', ${v.qty}, ${v.qty}, 'ยอดตั้งต้น', ${me.name}, ${me.id})`
       }
@@ -286,10 +334,10 @@ app.put("/api/products/:id", async (c) => {
         if (v.id) {
           if (!current.some((r: any) => r.id === v.id)) throw new Error("SKU ไม่ถูกต้อง")
           if (await skuTaken(tx, v.sku, v.id)) throw new Error(`SKU ${v.sku} ซ้ำกับที่มีอยู่แล้ว`)
-          await tx`UPDATE uni_variants SET sku = ${v.sku}, size = ${v.size}, color = ${v.color}, sort = ${sort++} WHERE id = ${v.id}`
+          await tx`UPDATE uni_variants SET sku = ${v.sku}, size = ${v.size}, color = ${v.color}, chest = ${v.chest}, sort = ${sort++} WHERE id = ${v.id}`
         } else {
           if (await skuTaken(tx, v.sku)) throw new Error(`SKU ${v.sku} ซ้ำกับที่มีอยู่แล้ว`)
-          const [nv] = await tx`INSERT INTO uni_variants (product_id, sku, size, color, qty, sort) VALUES (${id}, ${v.sku}, ${v.size}, ${v.color}, ${v.qty ?? 0}, ${sort++}) RETURNING id`
+          const [nv] = await tx`INSERT INTO uni_variants (product_id, sku, size, color, chest, qty, sort) VALUES (${id}, ${v.sku}, ${v.size}, ${v.color}, ${v.chest}, ${v.qty ?? 0}, ${sort++}) RETURNING id`
           if (v.qty) await tx`INSERT INTO uni_moves (product_id, variant_id, product_name, sku, size, color, type, qty, balance, ref, who, by_user)
             VALUES (${id}, ${nv.id}, ${name}, ${v.sku}, ${v.size}, ${v.color}, 'in', ${v.qty}, ${v.qty}, 'ยอดตั้งต้น', ${me.name}, ${me.id})`
         }
@@ -352,53 +400,84 @@ app.post("/api/variants/:id/receive", (c) => changeQty(c, "in"))
 app.post("/api/variants/:id/adjust", (c) => changeQty(c, "adj"))
 
 // ---------- requests ----------
+// Body: JSON, or multipart with "data" (JSON) + "slip" (payment proof, purchases only).
 app.post("/api/requests", async (c) => {
   const me = requireUser(c)!
-  const b = await c.req.json().catch(() => ({}))
+  let b: any = {}, slip: File | null = null
+  if ((c.req.header("content-type") ?? "").includes("multipart/form-data")) {
+    const form = await c.req.parseBody().catch(() => ({} as any))
+    try { b = JSON.parse(String(form.data ?? "{}")) } catch { return bad(c, "ข้อมูลไม่ถูกต้อง") }
+    if (form.slip instanceof File && form.slip.size > 0) slip = form.slip
+  } else b = await c.req.json().catch(() => ({}))
   const settings = await getSettings()
   const f = {
     req_date: /^\d{4}-\d{2}-\d{2}$/.test(String(b.req_date)) ? String(b.req_date) : bkkToday(),
     name: str(b.name, 100), emp_code: str(b.emp_code, 40), position: str(b.position, 100), dept: str(b.dept, 100),
-    phone: str(b.phone, 30), branch: str(b.branch, 100), type: str(b.type, 40), note: str(b.note, 500),
+    phone: str(b.phone, 30), email: str(b.email, 120).toLowerCase(), branch: str(b.branch, 100), type: str(b.type, 60), note: str(b.note, 500),
   }
   if (!f.name || !f.emp_code || !f.position || !f.branch) return bad(c, "กรุณากรอกข้อมูลที่บังคับให้ครบ")
+  if (!EMAIL_RE.test(f.email)) return bad(c, "กรุณากรอกอีเมลให้ถูกต้อง (ใช้แจ้งเมื่อจัดส่งแล้ว)")
   if (settings.branches.length && !settings.branches.includes(f.branch)) return bad(c, "กรุณาเลือกสาขาจากรายการ")
-  if (!REQUEST_TYPES.includes(f.type)) return bad(c, "กรุณาเลือกประเภทการเบิก")
+  if (settings.positions.length && !settings.positions.includes(f.position)) return bad(c, "กรุณาเลือกตำแหน่งจากรายการ")
+  if (settings.depts.length && f.dept && !settings.depts.includes(f.dept)) return bad(c, "กรุณาเลือกแผนกจากรายการ")
+  if (settings.depts.length && !f.dept) return bad(c, "กรุณาเลือกแผนก")
+  const type = REQUEST_TYPES.find((t) => t.label === f.type)
+  if (!type) return bad(c, "กรุณาเลือกประเภทการเบิก")
   const rawLines = Array.isArray(b.lines) ? b.lines : []
   const want = new Map<number, number>()
   for (const l of rawLines) {
     const vid = int(l?.variant_id), qty = int(l?.qty)
-    if (!Number.isInteger(vid) || !Number.isInteger(qty) || qty <= 0 || qty > 999) return bad(c, "จำนวนที่ขอเบิกต้องเป็นจำนวนเต็ม 1–999")
+    if (!Number.isInteger(vid) || !Number.isInteger(qty) || qty <= 0 || qty > 999) return bad(c, "จำนวนต้องเป็นจำนวนเต็ม 1–999")
     want.set(vid, (want.get(vid) ?? 0) + qty)
   }
-  if (!want.size) return bad(c, "กรุณาเพิ่มรายการที่ขอเบิกอย่างน้อย 1 รายการ")
-  if (want.size > 30) return bad(c, "ขอเบิกได้สูงสุด 30 รายการต่อคำขอ")
+  if (!want.size) return bad(c, "กรุณาเลือกไซส์และจำนวนเสื้ออย่างน้อย 1 รายการ")
+  if (want.size > 30) return bad(c, "ได้สูงสุด 30 รายการต่อคำขอ")
+  const total = [...want.values()].reduce((a, n) => a + n, 0)
+  if (type.qty && total !== type.qty) return bad(c, `ประเภท "${type.label}" เบิกได้ ${type.qty} ตัว (ตอนนี้เลือก ${total} ตัว)`)
+  let amount = 0
+  if (type.purchase) {
+    amount = priceFor(total, settings)
+    if (b.ack_hr !== true) return bad(c, "กรุณายืนยันว่าสอบถาม HR เรื่องจำนวนเสื้อคงเหลือและไซซ์แล้ว")
+    if (!slip) return bad(c, "กรุณาแนบหลักฐานการชำระเงิน")
+    if (slip.size > MAX_SLIP_BYTES) return bad(c, "ไฟล์หลักฐานการชำระเงินใหญ่เกิน 6 MB")
+    if (!SLIP_TYPES.includes(slip.type)) return bad(c, "หลักฐานการชำระเงินต้องเป็นรูปภาพ หรือ PDF")
+    if (int(b.amount) !== amount) return bad(c, `ยอดชำระไม่ตรงกับระบบ (${amount.toLocaleString()} บาท) กรุณารีเฟรชแล้วลองใหม่`)
+  }
   const vs = await sql`
     SELECT v.id, v.sku, v.size, v.color, p.id AS product_id, p.name, p.category, p.unit
     FROM uni_variants v JOIN uni_products p ON p.id = v.product_id
     WHERE v.id IN ${sql([...want.keys()])} AND v.deleted_at IS NULL AND p.deleted_at IS NULL`
   if (vs.length !== want.size) return bad(c, "มีรายการที่ไม่พบในระบบ กรุณาเลือกใหม่")
+  const slipBytes = slip ? new Uint8Array(await slip.arrayBuffer()) : null
+  const slipMime = slipBytes ? sniffSlip(slipBytes) : null
+  if (slipBytes && !slipMime) return bad(c, "หลักฐานการชำระเงินต้องเป็นไฟล์รูปภาพ (JPG, PNG, WEBP, HEIC) หรือ PDF")
   const no = await sql.begin(async (tx) => {
+    let slipId: number | null = null
+    if (slip && slipBytes) {
+      const [fr] = await tx`INSERT INTO uni_files (name, mime, size, data, uploaded_by) VALUES (${str(slip.name, 120) || "slip"}, ${slipMime}, ${slip.size}, ${slipBytes}, ${me.id}) RETURNING id`
+      slipId = fr.id
+    }
     const no = await nextNo(tx, `REQ-${thaiDateStamp()}`)
-    const [r] = await tx`INSERT INTO uni_requests (no, req_date, name, emp_code, position, dept, branch, phone, type, note, requester_id)
-      VALUES (${no}, ${f.req_date}, ${f.name}, ${f.emp_code}, ${f.position}, ${f.dept}, ${f.branch}, ${f.phone}, ${f.type}, ${f.note}, ${me.id}) RETURNING id`
+    const [r] = await tx`INSERT INTO uni_requests (no, req_date, name, emp_code, position, dept, branch, phone, email, type, kind, total_qty, amount, slip_file_id, note, requester_id)
+      VALUES (${no}, ${f.req_date}, ${f.name}, ${f.emp_code}, ${f.position}, ${f.dept}, ${f.branch}, ${f.phone}, ${f.email}, ${f.type}, ${type.purchase ? "purchase" : "issue"}, ${total}, ${amount}, ${slipId}, ${f.note}, ${me.id}) RETURNING id`
     for (const v of vs) await tx`INSERT INTO uni_request_lines (request_id, product_id, variant_id, product_name, category, unit, sku, size, color, qty)
       VALUES (${r.id}, ${v.product_id}, ${v.id}, ${v.name}, ${v.category}, ${v.unit}, ${v.sku}, ${v.size}, ${v.color}, ${want.get(v.id)!})`
     // Remember the requester's details for the next form.
-    await tx`UPDATE uni_users SET phone = ${f.phone}, position = ${f.position}, dept = ${f.dept}, branch = ${f.branch} WHERE id = ${me.id}`
+    await tx`UPDATE uni_users SET phone = ${f.phone}, email = ${f.email}, position = ${f.position}, dept = ${f.dept}, branch = ${f.branch} WHERE id = ${me.id}`
     return no
   })
-  return c.json({ no })
+  return c.json({ no, amount })
 })
 
 app.get("/api/requests", async (c) => {
   const me = requireUser(c)!
   const hr = me.role === "hr"
   const mine = !hr || c.req.query("mine") === "1"
-  const status = str(c.req.query("status"), 20)
+  const status = str(c.req.query("status"), 20), kind = str(c.req.query("kind"), 20)
   const page = Math.max(1, int(c.req.query("page") ?? 1) || 1), size = 30
   const conds = [sql`TRUE`]
   if (mine) conds.push(sql`requester_id = ${me.id}`)
+  if (kind === "purchase" || kind === "issue") conds.push(sql`kind = ${kind}`)
   const where = conds.reduce((a, b) => sql`${a} AND ${b}`)
   const counts = await sql`SELECT status, count(*)::int AS n FROM uni_requests WHERE ${where} GROUP BY status`
   const rows = await sql`
@@ -481,12 +560,106 @@ app.post("/api/requests/:no/approve", hrOnly, async (c) => {
   }
 })
 
+// Ship = delivery status "จัดส่งแล้ว" + delivery date, then email the employee.
 app.post("/api/requests/:no/ship", hrOnly, async (c) => {
   const me = requireUser(c)!
-  const [r] = await sql`UPDATE uni_requests SET status = 'shipped', shipped_at = NOW(), shipper_id = ${me.id}
-    WHERE no = ${c.req.param("no")} AND status = 'approved' RETURNING no`
+  const b = await c.req.json().catch(() => ({}))
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(String(b.date)) ? String(b.date) : bkkToday()
+  const [r] = await sql`UPDATE uni_requests SET status = 'shipped', shipped_at = NOW(), shipped_date = ${date}, shipper_id = ${me.id}
+    WHERE no = ${c.req.param("no")} AND status = 'approved' RETURNING *`
   if (!r) return bad(c, "ยืนยันจัดส่งได้เฉพาะคำขอที่รอจัดส่ง")
+  const notify = await notifyShipped(r)
+  return c.json({ ok: true, notify })
+})
+// Change the delivery date of a shipped request (typo fix) — no new email.
+app.post("/api/requests/:no/ship-date", hrOnly, async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(b.date))) return bad(c, "วันที่ไม่ถูกต้อง")
+  const [r] = await sql`UPDATE uni_requests SET shipped_date = ${String(b.date)} WHERE no = ${c.req.param("no")} AND status = 'shipped' RETURNING no`
+  if (!r) return bad(c, "แก้วันที่จัดส่งได้เฉพาะคำขอที่จัดส่งแล้ว")
   return c.json({ ok: true })
+})
+app.post("/api/requests/:no/notify", hrOnly, async (c) => {
+  const [r] = await sql`SELECT * FROM uni_requests WHERE no = ${c.req.param("no")} AND status = 'shipped'`
+  if (!r) return bad(c, "ส่งอีเมลแจ้งได้เฉพาะคำขอที่จัดส่งแล้ว")
+  const notify = await notifyShipped(r)
+  if (!notify.sent) return bad(c, "ส่งอีเมลไม่สำเร็จ: " + notify.error)
+  return c.json({ ok: true, notify })
+})
+async function notifyShipped(r: any): Promise<{ sent: boolean; error: string }> {
+  if (!r.email) { await sql`UPDATE uni_requests SET notify_error = ${"ไม่มีอีเมลในคำขอ"} WHERE id = ${r.id}`; return { sent: false, error: "ไม่มีอีเมลในคำขอ" } }
+  try {
+    const lines = await sql`SELECT * FROM uni_request_lines WHERE request_id = ${r.id} ORDER BY id`
+    const m = shippedEmail(r, lines as any, thaiDate(r.shipped_date))
+    await sendMail(r.email, m.subject, m.html)
+    await sql`UPDATE uni_requests SET notify_sent_at = NOW(), notify_error = '' WHERE id = ${r.id}`
+    console.log("[notify] shipped", r.no, "->", r.email)
+    return { sent: true, error: "" }
+  } catch (e: any) {
+    const error = str(e?.message ?? e, 300)
+    await sql`UPDATE uni_requests SET notify_error = ${error} WHERE id = ${r.id}`
+    console.error("[notify] failed", r.no, error)
+    return { sent: false, error }
+  }
+}
+
+// Payment slip — HR, or the employee who submitted the request.
+app.get("/api/files/:id", async (c) => {
+  const me = requireUser(c)!
+  const id = int(c.req.param("id"))
+  const [r] = await sql`SELECT requester_id FROM uni_requests WHERE slip_file_id = ${id}`
+  if (!r || (me.role !== "hr" && r.requester_id !== me.id)) return bad(c, "ไม่พบไฟล์", 404)
+  const [f] = await sql`SELECT name, mime, data FROM uni_files WHERE id = ${id}`
+  if (!f || !SLIP_TYPES.includes(f.mime)) return bad(c, "ไม่พบไฟล์", 404)
+  return new Response(f.data, { headers: { "Content-Type": f.mime, "Content-Disposition": `inline; filename*=UTF-8''${encodeURIComponent(f.name)}`, "X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=3600" } })
+})
+
+// Excel export for HR: purchases (amount, payment slip) + every request.
+app.get("/api/requests.xlsx", hrOnly, async (c) => {
+  const rows = await sql`SELECT * FROM uni_requests ORDER BY created_at DESC`
+  const ids = rows.map((r: any) => r.id)
+  const lines = ids.length ? await sql`SELECT * FROM uni_request_lines WHERE request_id IN ${sql(ids)} ORDER BY id` : []
+  const origin = new URL(c.req.url).origin.replace(/^http:/, c.req.header("x-forwarded-proto") === "https" ? "https:" : "http:")
+  const STATUS: Record<string, string> = { pending: "รออนุมัติ", approved: "อนุมัติแล้ว · รอดำเนินการจัดส่ง", shipped: "จัดส่งแล้ว", rejected: "ไม่อนุมัติ", cancelled: "ยกเลิก" }
+  const items = (r: any) => lines.filter((l: any) => l.request_id === r.id).map((l: any) => `${l.product_name} ${[l.size, l.color].filter(Boolean).join("/")} × ${l.qty}`).join(", ")
+  const d = (v: any) => (v ? new Date(v) : null)
+  const wb = new ExcelJS.Workbook()
+  wb.creator = "Uniform Stock"
+  const cols = (purchase: boolean) => [
+    { header: "เลขที่คำขอ", key: "no", width: 18 }, { header: "วันที่ขอ", key: "created", width: 12, style: { numFmt: "dd/mm/yyyy" } },
+    { header: "ชื่อ-นามสกุล", key: "name", width: 24 }, { header: "รหัสพนักงาน", key: "emp", width: 12 }, { header: "ตำแหน่ง", key: "pos", width: 18 },
+    { header: "แผนก", key: "dept", width: 16 }, { header: "สาขา", key: "branch", width: 16 }, { header: "โทร", key: "phone", width: 13 }, { header: "อีเมล", key: "email", width: 26 },
+    ...(purchase ? [] : [{ header: "ประเภทการเบิก", key: "type", width: 30 }]),
+    { header: "รายการ (ไซส์ × จำนวน)", key: "items", width: 40 }, { header: "จำนวนรวม (ตัว)", key: "qty", width: 12 },
+    ...(purchase ? [{ header: "ยอดชำระ (บาท)", key: "amount", width: 13, style: { numFmt: "#,##0" } }, { header: "หลักฐานการชำระเงิน", key: "slip", width: 20 }] : []),
+    { header: "สถานะ", key: "status", width: 26 }, { header: "เลขใบส่งสินค้า", key: "dn", width: 16 },
+    { header: "วันที่จัดส่ง", key: "shipped", width: 12, style: { numFmt: "dd/mm/yyyy" } }, { header: "แจ้งอีเมลแล้ว", key: "notified", width: 12 }, { header: "หมายเหตุ", key: "note", width: 24 },
+  ]
+  for (const [title, purchase] of [["สั่งซื้อเสื้อเพิ่ม", true], ["คำขอทั้งหมด", false]] as const) {
+    const ws = wb.addWorksheet(title, { views: [{ state: "frozen", ySplit: 1 }] })
+    ws.columns = cols(purchase) as any
+    for (const r of rows.filter((x: any) => !purchase || x.kind === "purchase")) {
+      const row = ws.addRow({
+        no: r.no, created: d(r.created_at), name: r.name, emp: r.emp_code, pos: r.position, dept: r.dept, branch: r.branch, phone: r.phone, email: r.email,
+        type: r.type, items: items(r), qty: r.total_qty || lines.filter((l: any) => l.request_id === r.id).reduce((a: number, l: any) => a + l.qty, 0),
+        amount: r.kind === "purchase" ? r.amount : null, slip: r.slip_file_id ? "เปิดดูสลิป" : "",
+        status: STATUS[r.status] ?? r.status, dn: r.dn_no ?? "", shipped: d(r.shipped_date), notified: r.notify_sent_at ? "ส่งแล้ว" : r.status === "shipped" ? "ยังไม่ส่ง" : "", note: r.note,
+      })
+      if (purchase && r.slip_file_id) row.getCell("slip").value = { text: "เปิดดูสลิป", hyperlink: `${origin}/api/files/${r.slip_file_id}` } as any
+    }
+    ws.getRow(1).font = { bold: true }
+    ws.getRow(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE6F4F5" } }
+    ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: ws.columnCount } }
+    if (purchase && ws.rowCount > 1) {
+      const amountCol = ws.getColumn("amount").number, qtyCol = ws.getColumn("qty").number
+      const sumRow = ws.addRow([])
+      sumRow.getCell(1).value = "รวม"; sumRow.font = { bold: true }
+      sumRow.getCell(qtyCol).value = { formula: `SUM(${ws.getColumn(qtyCol).letter}2:${ws.getColumn(qtyCol).letter}${ws.rowCount - 1})` } as any
+      sumRow.getCell(amountCol).value = { formula: `SUM(${ws.getColumn(amountCol).letter}2:${ws.getColumn(amountCol).letter}${ws.rowCount - 1})` } as any
+    }
+  }
+  const buf = await wb.xlsx.writeBuffer()
+  return new Response(buf as ArrayBuffer, { headers: { "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Content-Disposition": `attachment; filename="uniform-requests-${bkkToday()}.xlsx"` } })
 })
 
 // ---------- history (approved + shipped lines) ----------
@@ -595,7 +768,7 @@ app.get("/dn/:no", async (c) => {
   <div class="head">
     <div><div class="co">${esc(s.company || "ฝ่ายทรัพยากรบุคคล")}</div><h1>ใบส่งสินค้า (Delivery Note)</h1><div class="muted">ชุดยูนิฟอร์มพนักงาน</div></div>
     <table class="meta"><tr><td>เลขที่</td><td><b>${esc(r.dn_no)}</b></td></tr><tr><td>วันที่</td><td>${esc(thaiDate(r.approved_at))}</td></tr>
-    <tr><td>อ้างอิงคำขอ</td><td>${esc(r.no)}</td></tr><tr><td>ประเภทการเบิก</td><td>${esc(r.type)}</td></tr></table>
+    <tr><td>อ้างอิงคำขอ</td><td>${esc(r.no)}</td></tr><tr><td>ประเภทการเบิก</td><td>${esc(r.type)}</td></tr>${r.kind === "purchase" ? `<tr><td>ยอดชำระ</td><td>${Number(r.amount).toLocaleString()} บาท</td></tr>` : ""}${r.shipped_date ? `<tr><td>วันที่จัดส่ง</td><td>${esc(thaiDate(r.shipped_date))}</td></tr>` : ""}</table>
   </div>
   <div class="grid">
     <div class="box"><b>ผู้รับ</b>${esc(r.name)} (รหัส ${esc(r.emp_code)})<br>ตำแหน่ง ${esc(r.position)}${r.dept ? ` · แผนก ${esc(r.dept)}` : ""}${r.phone ? `<br>โทร ${esc(r.phone)}` : ""}</div>

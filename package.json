@@ -4,13 +4,16 @@
   "type": "module",
   "private": true,
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/nodemailer": "^8.0.2"
   },
   "peerDependencies": {
     "typescript": "^5"
   },
   "dependencies": {
+    "exceljs": "^4.4.0",
     "hono": "^4.13.13",
+    "nodemailer": "^10.1.1",
     "postgres": "^3.4.9"
   }
 }

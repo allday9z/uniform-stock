@@ -144,6 +144,30 @@ export async function initDB(): Promise<void> {
       qty          INT NOT NULL CHECK (qty > 0)
     )`
   await sql`CREATE INDEX IF NOT EXISTS uni_lines_request ON uni_request_lines (request_id)`
+
+  // ---- Oct 2026 revision (htask-1792149268859) — additive, old rows keep working ----
+  // Employee email (notification when HR ships), purchase orders (amount + payment slip),
+  // delivery date, notification result, chest size per SKU for the size dropdown.
+  await sql`ALTER TABLE uni_users ADD COLUMN IF NOT EXISTS email TEXT`
+  await sql`ALTER TABLE uni_variants ADD COLUMN IF NOT EXISTS chest TEXT NOT NULL DEFAULT ''`
+  await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT ''`
+  await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'issue'`      // issue | purchase
+  await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS total_qty INT NOT NULL DEFAULT 0`
+  await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS amount INT NOT NULL DEFAULT 0`          // baht, purchases only
+  await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS slip_file_id INT`
+  await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS shipped_date DATE`
+  await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS notify_sent_at TIMESTAMPTZ`
+  await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS notify_error TEXT NOT NULL DEFAULT ''`
+  await sql`
+    CREATE TABLE IF NOT EXISTS uni_files (
+      id          SERIAL PRIMARY KEY,
+      name        TEXT NOT NULL,
+      mime        TEXT NOT NULL,
+      size        INT NOT NULL,
+      data        BYTEA NOT NULL,
+      uploaded_by INT NOT NULL REFERENCES uni_users(id),
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
 }
 
 /** Next running number for a prefix, inside the caller's transaction. */
