@@ -147,3 +147,4 @@ table.sizes td .chip { display: inline-block; min-width: 34px; }
 .card.issued { font-size: 14px; }
 .lrow.item { grid-template-columns: 2fr 1.4fr 90px; }
 .lrow.item #itemSku[hidden] + #itemQty { grid-column: span 2; max-width: 120px; }
+.stockwarn { margin-top: 8px; }

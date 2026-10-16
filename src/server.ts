@@ -440,6 +440,30 @@ app.post("/api/variants/:id/receive", (c) => changeQty(c, "in"))
 app.post("/api/variants/:id/adjust", (c) => changeQty(c, "adj"))
 
 // ---------- requests ----------
+// Lines asking for more than the current stock — labels only, never quantities
+// (employees must not see stock numbers).
+const SHORT_MSG = "สต๊อกคงเหลือไม่เพียงพอ โปรดติดต่อ People Team"
+async function shortLines(want: Map<number, number>): Promise<{ variant_id: number; label: string }[]> {
+  if (!want.size) return []
+  const rows = await sql`SELECT v.id, v.qty, v.size, v.color, v.sku, p.name FROM uni_variants v JOIN uni_products p ON p.id = v.product_id
+    WHERE v.id IN ${sql([...want.keys()])} AND v.deleted_at IS NULL AND p.deleted_at IS NULL`
+  return want.size === 0 ? [] : [...want.entries()].flatMap(([vid, q]) => {
+    const v: any = rows.find((r: any) => r.id === vid)
+    return !v || v.qty < q ? [{ variant_id: vid, label: v ? [v.name, [v.size, v.color].filter(Boolean).join(" / ")].filter(Boolean).join(" · ") : "รายการที่เลือก" }] : []
+  })
+}
+// Live check for the request form (any signed-in user): which lines can't be filled.
+app.post("/api/stock-check", async (c) => {
+  const b = await c.req.json().catch(() => ({}))
+  const want = new Map<number, number>()
+  for (const l of Array.isArray(b.lines) ? b.lines.slice(0, 30) : []) {
+    const vid = int(l?.variant_id), qty = int(l?.qty)
+    if (Number.isInteger(vid) && Number.isInteger(qty) && qty > 0) want.set(vid, (want.get(vid) ?? 0) + qty)
+  }
+  const short = await shortLines(want)
+  return c.json({ ok: !short.length, short, message: short.length ? SHORT_MSG : "" })
+})
+
 // Body: JSON, or multipart with "data" (JSON) + "slip" (payment proof, purchases only).
 app.post("/api/requests", async (c) => {
   const me = requireUser(c)!
@@ -501,6 +525,9 @@ app.post("/api/requests", async (c) => {
   for (const v of vs as any[]) {
     if (itemProduct ? v.product_id !== itemProduct : linked.includes(v.product_id)) return bad(c, "รายการที่เลือกไม่ตรงกับประเภทการเบิก กรุณาเลือกใหม่")
   }
+  // Not enough stock → stop here (before saving any payment slip).
+  const short = await shortLines(want)
+  if (short.length) return c.json({ error: `${SHORT_MSG} (${short.map((x) => x.label).join(", ")})`, short }, 409)
   const slipBytes = slip ? new Uint8Array(await slip.arrayBuffer()) : null
   const slipMime = slipBytes ? sniffSlip(slipBytes) : null
   if (slipBytes && !slipMime) return bad(c, "หลักฐานการชำระเงินต้องเป็นไฟล์รูปภาพ (JPG, PNG, WEBP, HEIC) หรือ PDF")

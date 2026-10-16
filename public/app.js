@@ -292,7 +292,7 @@
       '<div class="card"><h3 style="margin-top:0" id="itemTitle">รายละเอียดรายการ</h3><p class="small muted" id="typeHint" style="margin:-4px 0 10px">เลือกประเภทการเบิกก่อน</p>' +
       '<div id="shirtBlock">' + (shirts.length ? "" : '<div class="note red">ยังไม่มีรายการเสื้อในระบบ — กรุณาติดต่อ HR</div>') + '<div id="lines"></div><button class="btn sm ghost" id="addLine">+ เพิ่มไซส์</button></div>' +
       '<div id="itemBlock" hidden><div class="lrow item"><div class="i prname" id="itemName"></div><select class="i" id="itemSku" hidden></select><input class="i" id="itemQty" type="number" min="1" max="99" step="1" value="1" aria-label="จำนวน"></div></div>' +
-      '<div class="totalbox" id="totalBox"></div>' +
+      '<div class="totalbox" id="totalBox"></div><div class="note red stockwarn" id="stockWarn" hidden></div>' +
       '<div class="field" style="margin-top:14px"><label class="f">หมายเหตุ</label><textarea class="i" id="note" rows="2"></textarea></div>' +
       '<div class="err" id="err"></div><button class="btn" id="submit">ส่งคำขอเบิก</button></div>');
     var lines = $("#lines");
@@ -321,7 +321,23 @@
       return $$("#lines .lrow").map(function (r) { return { variant_id: $(".va", r).value, qty: $(".qt", r).value }; }).filter(function (l) { return l.variant_id; });
     }
     function totalQty() { return isItem() ? (Number($("#itemQty").value) || 0) : collect().reduce(function (a, l) { return a + (Number(l.qty) || 0); }, 0); }
+    // Live stock check (no numbers shown): warn as soon as a size / quantity can't be filled.
+    var stockShort = [], checkSeq = 0, checkTimer = null;
+    function scheduleCheck() {
+      clearTimeout(checkTimer);
+      checkTimer = setTimeout(async function () {
+        var lines = collect(), seq = ++checkSeq;
+        if (!lines.length) { stockShort = []; renderWarn(); return; }
+        try { var r = await api("/api/stock-check", { method: "POST", body: { lines: lines } }); if (seq === checkSeq) { stockShort = r.short || []; renderWarn(); } } catch (e) {}
+      }, 250);
+    }
+    function renderWarn() {
+      var w = $("#stockWarn"); if (!w) return;
+      w.hidden = !stockShort.length;
+      w.innerHTML = stockShort.length ? "<b>สต๊อกคงเหลือไม่เพียงพอ โปรดติดต่อ People Team</b><br>" + stockShort.map(function (x) { return esc(x.label); }).join(", ") : "";
+    }
     function update() {
+      scheduleCheck();
       var t = typeOf($("#type").value), n = totalQty(), box = $("#totalBox");
       $("#shirtBlock").hidden = !!(t && t.item !== "shirt"); $("#itemBlock").hidden = !(t && t.item !== "shirt");
       if (!t) { $("#typeHint").textContent = "เลือกประเภทการเบิกก่อน"; $("#itemTitle").textContent = "รายละเอียดรายการ"; box.innerHTML = ""; $("#submit").textContent = "ส่งคำขอเบิก"; return; }
@@ -357,7 +373,7 @@
         $("#itemQty").value = 1;
       }
       // One size line with the entitled quantity is the common case — prefill it.
-      if (t && t.qty && $$(".lrow").length === 1) $(".qt", lines.children[0]).value = t.qty;
+      if (t && t.qty && $$("#lines .lrow").length === 1) $(".qt", lines.children[0]).value = t.qty;
       update();
     };
     function body() {
@@ -384,6 +400,10 @@
       if (missing.length) { $("#err").textContent = "กรุณากรอก: " + missing.join(", "); return; }
       var n = totalQty();
       if (t.qty && n !== t.qty) { $("#err").textContent = "ประเภทนี้เบิกได้ " + t.qty + " ตัว (ตอนนี้เลือก " + n + " ตัว)"; return; }
+      if (b.lines.length) {   // re-check right before submitting / paying
+        try { var chk = await api("/api/stock-check", { method: "POST", body: { lines: b.lines } }); stockShort = chk.short || []; renderWarn(); } catch (e) {}
+        if (stockShort.length) { $("#err").textContent = "สต๊อกคงเหลือไม่เพียงพอ โปรดติดต่อ People Team"; return; }
+      }
       $("#err").textContent = "";
       if (amountFor(t, n) > 0) return paymentStep(b, n, t);
       busy(this, true);
