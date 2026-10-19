@@ -458,7 +458,7 @@ async function shortLines(want: Map<number, number>): Promise<{ variant_id: numb
 app.post("/api/stock-check", async (c) => {
   const b = await c.req.json().catch(() => ({}))
   const want = new Map<number, number>()
-  for (const l of Array.isArray(b.lines) ? b.lines.slice(0, 30) : []) {
+  for (const l of Array.isArray(b.lines) ? b.lines.slice(0, 200) : []) {
     const vid = int(l?.variant_id), qty = int(l?.qty)
     if (Number.isInteger(vid) && Number.isInteger(qty) && qty > 0) want.set(vid, (want.get(vid) ?? 0) + qty)
   }
@@ -488,14 +488,42 @@ async function readRequestBody(c: any): Promise<{ b: any; slip: FileIn | null; p
   } else b = await c.req.json().catch(() => ({}))
   return { b, slip, photo }
 }
-type Checked = { f: any; type: RequestType; total: number; amount: number; vs: any[]; want: Map<number, number> }
+// A request holds one or more types (items), each validated on its own; they share the employee
+// details, one payment (sum of the items) and one approval / delivery note.
+type CheckedItem = { type: RequestType; total: number; amount: number; want: Map<number, number> }
+type Checked = { f: any; items: CheckedItem[]; total: number; amount: number; vs: any[]; want: Map<number, number> }
+function checkItem(raw: any, settings: Settings): CheckedItem | string {
+  const type = typesFor(settings).find((t) => t.label === str(raw?.type, 60))
+  if (!type) return "กรุณาเลือกประเภทการเบิก"
+  const rawLines = Array.isArray(raw.lines) ? raw.lines : []
+  const want = new Map<number, number>()
+  for (const l of rawLines) {
+    const vid = int(l?.variant_id), qty = int(l?.qty)
+    if (!Number.isInteger(vid) || !Number.isInteger(qty) || qty <= 0 || qty > 999) return "จำนวนต้องเป็นจำนวนเต็ม 1–999"
+    want.set(vid, (want.get(vid) ?? 0) + qty)
+  }
+  // Service item (no linked stock product): just a quantity, no lines.
+  const service = type.item !== "shirt" && !type.bundle && !settings.itemProducts[type.item]
+  if (type.bundle || service) {
+    if (service) want.clear()
+    const q = int(raw.qty)
+    if (!Number.isInteger(q) || q < 1 || q > 99) return type.bundle ? "จำนวนชุดต้องเป็นจำนวนเต็ม 1–99" : "จำนวนต้องเป็นจำนวนเต็ม 1–99"
+  } else {
+    if (!want.size) return type.item === "shirt" ? "กรุณาเลือกไซส์และจำนวนเสื้ออย่างน้อย 1 รายการ" : "กรุณาระบุจำนวน"
+    if (want.size > 30) return "ได้สูงสุด 30 รายการต่อประเภท"
+  }
+  const total = service || type.bundle ? int(raw.qty) : [...want.values()].reduce((a, n) => a + n, 0)
+  if (type.qty && total !== type.qty) return `ประเภท "${type.label}" เบิกได้ ${type.qty} ตัว (ตอนนี้เลือก ${total} ตัว)`
+  const amount = type.item === "shirt" ? (type.purchase ? priceFor(total, settings) : 0) : total * (type.price ?? 0)
+  return { type, total, amount, want }
+}
 async function checkRequest(b: any, hr: boolean, files: { slip: boolean; photo: boolean }): Promise<Checked | { error: string; status?: number; short?: any }> {
   const settings = await getSettings()
   const E = (error: string) => ({ error })
   const f = {
     req_date: /^\d{4}-\d{2}-\d{2}$/.test(String(b.req_date)) ? String(b.req_date) : bkkToday(),
     name: str(b.name, 100), emp_code: str(b.emp_code, 40), position: str(b.position, 100), dept: str(b.dept, 100),
-    phone: str(b.phone, 30), email: str(b.email, 120).toLowerCase(), branch: str(b.branch, 100), type: str(b.type, 60), note: str(b.note, 500),
+    phone: str(b.phone, 30), email: str(b.email, 120).toLowerCase(), branch: str(b.branch, 100), type: "", note: str(b.note, 500),
   }
   if (!f.name || !f.emp_code || !f.position || !f.branch) return E("กรุณากรอกข้อมูลที่บังคับให้ครบ")
   if (!EMAIL_RE.test(f.email)) return E("กรุณากรอกอีเมลให้ถูกต้อง (ใช้แจ้งเมื่อจัดส่งแล้ว)")
@@ -503,56 +531,45 @@ async function checkRequest(b: any, hr: boolean, files: { slip: boolean; photo: 
   if (settings.positions.length && !settings.positions.includes(f.position)) return E("กรุณาเลือกตำแหน่งจากรายการ")
   if (settings.depts.length && f.dept && !settings.depts.includes(f.dept)) return E("กรุณาเลือกแผนกจากรายการ")
   if (settings.depts.length && !f.dept) return E("กรุณาเลือกแผนก")
-  const type = typesFor(settings).find((t) => t.label === f.type)
-  if (!type) return E("กรุณาเลือกประเภทการเบิก")
-  const linked = linkedProductIds(settings)
-  // Stock products this type may draw from: shirts = unlinked products; an item = its linked product;
-  // a bundle = the linked products of its items (each must appear once per set).
-  const parts = type.bundle ? type.bundle.map((it) => settings.itemProducts[it] ?? null).filter((x): x is number => Number.isInteger(x)) : []
-  const itemProduct = type.item === "shirt" || type.bundle ? null : settings.itemProducts[type.item] ?? null
-  const rawLines = Array.isArray(b.lines) ? b.lines : []
-  const want = new Map<number, number>()
-  for (const l of rawLines) {
-    const vid = int(l?.variant_id), qty = int(l?.qty)
-    if (!Number.isInteger(vid) || !Number.isInteger(qty) || qty <= 0 || qty > 999) return E("จำนวนต้องเป็นจำนวนเต็ม 1–999")
-    want.set(vid, (want.get(vid) ?? 0) + qty)
+  // items[] (new form) — or the old single-type body { type, qty, lines }.
+  const rawItems: any[] = Array.isArray(b.items) && b.items.length ? b.items : [{ type: b.type, qty: b.qty, lines: b.lines }]
+  if (rawItems.length > 10) return E("ได้สูงสุด 10 ประเภทต่อคำขอ")
+  const items: CheckedItem[] = []
+  for (const raw of rawItems) {
+    const it = checkItem(raw, settings)
+    if (typeof it === "string") return E(rawItems.length > 1 && raw?.type && !it.includes(str(raw.type, 60)) ? `${str(raw.type, 60)}: ${it}` : it)
+    if (items.some((x) => x.type.label === it.type.label)) return E(`เลือกประเภท "${it.type.label}" ซ้ำ — กรุณารวมเป็นรายการเดียว`)
+    items.push(it)
   }
-  // Service item (no linked stock product): just a quantity, no lines.
-  const service = type.item !== "shirt" && !type.bundle && !itemProduct
-  if (type.bundle) {
-    const q = int(b.qty)
-    if (!Number.isInteger(q) || q < 1 || q > 99) return E("จำนวนชุดต้องเป็นจำนวนเต็ม 1–99")
-  } else if (service) {
-    want.clear()
-    const q = int(b.qty)
-    if (!Number.isInteger(q) || q < 1 || q > 99) return E("จำนวนต้องเป็นจำนวนเต็ม 1–99")
-  } else {
-    if (!want.size) return E(type.item === "shirt" ? "กรุณาเลือกไซส์และจำนวนเสื้ออย่างน้อย 1 รายการ" : "กรุณาระบุจำนวน")
-    if (want.size > 30) return E("ได้สูงสุด 30 รายการต่อคำขอ")
-  }
-  const total = service || type.bundle ? int(b.qty) : [...want.values()].reduce((a, n) => a + n, 0)
-  if (type.qty && total !== type.qty) return E(`ประเภท "${type.label}" เบิกได้ ${type.qty} ตัว (ตอนนี้เลือก ${total} ตัว)`)
-  const amount = type.item === "shirt" ? (type.purchase ? priceFor(total, settings) : 0) : total * (type.price ?? 0)
+  f.type = items.map((x) => x.type.label).join(" + ")
+  const total = items.reduce((a, x) => a + x.total, 0), amount = items.reduce((a, x) => a + x.amount, 0)
   if (amount > 0 && !hr) {   // HR records cash / later payment — slip optional
     if (b.ack_hr !== true) return E("กรุณายืนยันว่าสอบถาม HR เรื่องจำนวนคงเหลือแล้ว")
     if (!files.slip) return E("กรุณาแนบหลักฐานการชำระเงิน")
     if (int(b.amount) !== amount) return E(`ยอดชำระไม่ตรงกับระบบ (${amount.toLocaleString()} บาท) กรุณารีเฟรชแล้วลองใหม่`)
   }
-  if (type.photo && !hr && !files.photo) return E("กรุณาถ่ายรูปของที่ชำรุดแนบมาด้วย")
+  if (items.some((x) => x.type.photo) && !hr && !files.photo) return E("กรุณาถ่ายรูปของที่ชำรุดแนบมาด้วย")
+  const want = new Map<number, number>()   // all items together — for the stock check
+  for (const it of items) for (const [vid, q] of it.want) want.set(vid, (want.get(vid) ?? 0) + q)
   const vs = want.size ? await sql`
     SELECT v.id, v.sku, v.size, v.color, p.id AS product_id, p.name, p.category, p.unit
     FROM uni_variants v JOIN uni_products p ON p.id = v.product_id
     WHERE v.id IN ${sql([...want.keys()])} AND v.deleted_at IS NULL AND p.deleted_at IS NULL` : []
   if (vs.length !== want.size) return E("มีรายการที่ไม่พบในระบบ กรุณาเลือกใหม่")
-  // Lines must come from the right product: the linked one for an item, an unlinked one for shirts.
-  for (const v of vs as any[]) {
-    const ok = type.bundle ? parts.includes(v.product_id) : itemProduct ? v.product_id === itemProduct : !linked.includes(v.product_id)
-    if (!ok) return E("รายการที่เลือกไม่ตรงกับประเภทการเบิก กรุณาเลือกใหม่")
-  }
-  if (type.bundle) {   // one line per linked part, quantity = number of sets
-    for (const pid of parts) {
-      const ls = (vs as any[]).filter((v) => v.product_id === pid)
-      if (ls.length !== 1 || want.get(ls[0].id) !== total) return E("ชุดบัตรต้องมีสายคล้องคอและกรอบบัตรอย่างละ 1 ต่อชุด กรุณาเลือกใหม่")
+  // Lines must come from the right product: shirts = unlinked products; an item = its linked product;
+  // a bundle = one line per linked part of its items, quantity = number of sets.
+  const linked = linkedProductIds(settings)
+  for (const it of items) {
+    const type = it.type, mine = (vs as any[]).filter((v) => it.want.has(v.id))
+    const parts = type.bundle ? type.bundle.map((x) => settings.itemProducts[x] ?? null).filter((x): x is number => Number.isInteger(x)) : []
+    const itemProduct = type.item === "shirt" || type.bundle ? null : settings.itemProducts[type.item] ?? null
+    for (const v of mine) {
+      const ok = type.bundle ? parts.includes(v.product_id) : itemProduct ? v.product_id === itemProduct : !linked.includes(v.product_id)
+      if (!ok) return E(`${type.label}: รายการที่เลือกไม่ตรงกับประเภทการเบิก กรุณาเลือกใหม่`)
+    }
+    if (type.bundle) for (const pid of parts) {
+      const ls = mine.filter((v) => v.product_id === pid)
+      if (ls.length !== 1 || it.want.get(ls[0].id) !== it.total) return E("ชุดบัตรต้องมีสายคล้องคอและกรอบบัตรอย่างละ 1 ต่อชุด กรุณาเลือกใหม่")
     }
   }
   // Not enough stock → stop here (before saving any file). HR may record it anyway; approval re-checks.
@@ -560,8 +577,9 @@ async function checkRequest(b: any, hr: boolean, files: { slip: boolean; photo: 
     const short = await shortLines(want)
     if (short.length) return { error: `${SHORT_MSG} (${short.map((x) => x.label).join(", ")})`, status: 409, short }
   }
-  return { f, type, total, amount, vs: vs as any[], want }
+  return { f, items, total, amount, vs: vs as any[], want }
 }
+const itemsJson = (items: CheckedItem[]) => items.map((x) => ({ type: x.type.label, qty: x.total, amount: x.amount }))
 
 app.post("/api/requests", async (c) => {
   const me = requireUser(c)!
@@ -569,15 +587,14 @@ app.post("/api/requests", async (c) => {
   const rb = await readRequestBody(c); if (typeof rb === "string") return bad(c, rb)
   const ck = await checkRequest(rb.b, hr, { slip: !!rb.slip, photo: !!rb.photo })
   if ("error" in ck) return c.json({ error: ck.error, short: ck.short }, (ck.status ?? 400) as any)
-  const { f, total, amount, vs, want } = ck
-
+  const { f, items, total, amount, vs } = ck
   const no = await sql.begin(async (tx) => {
     const slipId = rb.slip ? await saveFile(tx, rb.slip, me.id) : null
     const photoId = rb.photo ? await saveFile(tx, rb.photo, me.id) : null
     const no = await nextNo(tx, `REQ-${thaiDateStamp()}`)
-    const [r] = await tx`INSERT INTO uni_requests (no, req_date, name, emp_code, position, dept, branch, phone, email, type, kind, total_qty, amount, slip_file_id, photo_file_id, by_hr, note, requester_id)
-      VALUES (${no}, ${f.req_date}, ${f.name}, ${f.emp_code}, ${f.position}, ${f.dept}, ${f.branch}, ${f.phone}, ${f.email}, ${f.type}, ${amount > 0 ? "purchase" : "issue"}, ${total}, ${amount}, ${slipId}, ${photoId}, ${hr}, ${f.note}, ${me.id}) RETURNING id`
-    await insertLines(tx, r.id, vs, want)
+    const [r] = await tx`INSERT INTO uni_requests (no, req_date, name, emp_code, position, dept, branch, phone, email, type, items, kind, total_qty, amount, slip_file_id, photo_file_id, by_hr, note, requester_id)
+      VALUES (${no}, ${f.req_date}, ${f.name}, ${f.emp_code}, ${f.position}, ${f.dept}, ${f.branch}, ${f.phone}, ${f.email}, ${f.type}, ${sql.json(itemsJson(items))}, ${amount > 0 ? "purchase" : "issue"}, ${total}, ${amount}, ${slipId}, ${photoId}, ${hr}, ${f.note}, ${me.id}) RETURNING id`
+    await insertLines(tx, r.id, vs, items)
     // Remember the requester's details for the next form (not when HR files it for someone else).
     if (!hr) await tx`UPDATE uni_users SET phone = ${f.phone}, email = ${f.email}, position = ${f.position}, dept = ${f.dept}, branch = ${f.branch} WHERE id = ${me.id}`
     return no
@@ -588,9 +605,29 @@ async function saveFile(tx: any, f: FileIn, by: number): Promise<number> {
   const [fr] = await tx`INSERT INTO uni_files (name, mime, size, data, uploaded_by) VALUES (${f.name}, ${f.mime}, ${f.size}, ${f.bytes}, ${by}) RETURNING id`
   return fr.id
 }
-async function insertLines(tx: any, requestId: number, vs: any[], want: Map<number, number>) {
-  for (const v of vs) await tx`INSERT INTO uni_request_lines (request_id, product_id, variant_id, product_name, category, unit, sku, size, color, qty)
-    VALUES (${requestId}, ${v.product_id}, ${v.id}, ${v.name}, ${v.category}, ${v.unit}, ${v.sku}, ${v.size}, ${v.color}, ${want.get(v.id)!})`
+async function insertLines(tx: any, requestId: number, vs: any[], items: CheckedItem[]) {
+  for (const it of items) for (const [vid, qty] of it.want) {
+    const v = vs.find((x) => x.id === vid)
+    await tx`INSERT INTO uni_request_lines (request_id, product_id, variant_id, product_name, category, unit, sku, size, color, qty, req_type)
+      VALUES (${requestId}, ${v.product_id}, ${v.id}, ${v.name}, ${v.category}, ${v.unit}, ${v.sku}, ${v.size}, ${v.color}, ${qty}, ${it.type.label})`
+  }
+}
+// The items of a request (old rows have none stored: one item from the request itself).
+function reqItems(r: any): { type: string; qty: number; amount: number }[] {
+  return Array.isArray(r.items) && r.items.length ? r.items : [{ type: r.type, qty: r.total_qty, amount: r.amount }]
+}
+// Rows for the delivery note / email / export: stock lines + a row for whatever cuts no stock
+// (a service item such as a new ID card, or the card in an ID-card set).
+function displayRows(r: any, lines: any[], s: Settings): { sku: string; product_name: string; size: string; color: string; qty: number; unit: string }[] {
+  const items = reqItems(r), rows = [...lines]
+  const names = Object.fromEntries(ITEMS.map((x) => [x.key, x.label]))
+  for (const it of items) {
+    const has = lines.some((l) => (l.req_type || items[0].type) === it.type)
+    const t = REQUEST_TYPES.find((x) => x.label === it.type)
+    if (!has) rows.push({ sku: "", product_name: it.type, size: "", color: "", qty: it.qty, unit: "" })
+    else if (t?.bundle) for (const part of t.bundle) if (!s.itemProducts[part]) rows.push({ sku: "", product_name: names[part] ?? part, size: "", color: "", qty: it.qty, unit: "" })
+  }
+  return rows
 }
 
 // One request (HR, or the employee who filed it) — used to prefill the HR edit form.
@@ -610,17 +647,17 @@ app.put("/api/requests/:no", hrOnly, async (c) => {
   const rb = await readRequestBody(c); if (typeof rb === "string") return bad(c, rb)
   const ck = await checkRequest(rb.b, true, { slip: !!rb.slip || !!cur.slip_file_id, photo: !!rb.photo || !!cur.photo_file_id })
   if ("error" in ck) return c.json({ error: ck.error }, (ck.status ?? 400) as any)
-  const { f, total, amount, vs, want } = ck
+  const { f, items, total, amount, vs } = ck
   const ok = await sql.begin(async (tx) => {
     const [lock] = await tx`SELECT id, status FROM uni_requests WHERE id = ${cur.id} FOR UPDATE`
     if (lock.status !== "pending") return false
     const slipId = rb.slip ? await saveFile(tx, rb.slip, me.id) : cur.slip_file_id
     const photoId = rb.photo ? await saveFile(tx, rb.photo, me.id) : cur.photo_file_id
     await tx`UPDATE uni_requests SET req_date = ${f.req_date}, name = ${f.name}, emp_code = ${f.emp_code}, position = ${f.position}, dept = ${f.dept}, branch = ${f.branch},
-      phone = ${f.phone}, email = ${f.email}, type = ${f.type}, kind = ${amount > 0 ? "purchase" : "issue"}, total_qty = ${total}, amount = ${amount},
+      phone = ${f.phone}, email = ${f.email}, type = ${f.type}, items = ${sql.json(itemsJson(items))}, kind = ${amount > 0 ? "purchase" : "issue"}, total_qty = ${total}, amount = ${amount},
       slip_file_id = ${slipId}, photo_file_id = ${photoId}, note = ${f.note}, edited_at = NOW(), edited_by = ${me.name} WHERE id = ${cur.id}`
     await tx`DELETE FROM uni_request_lines WHERE request_id = ${cur.id}`
-    await insertLines(tx, cur.id, vs, want)
+    await insertLines(tx, cur.id, vs, items)
     return true
   })
   if (!ok) return bad(c, "คำขอนี้ไม่ได้อยู่ในสถานะรออนุมัติแล้ว")
@@ -693,11 +730,12 @@ app.post("/api/requests/:no/approve", hrOnly, async (c) => {
       const lines = await tx`SELECT * FROM uni_request_lines WHERE request_id = ${r.id} ORDER BY variant_id`
       const vids = lines.map((l: any) => l.variant_id)
       const vs = vids.length ? await tx`SELECT id, qty, deleted_at FROM uni_variants WHERE id IN ${tx(vids)} ORDER BY id FOR UPDATE` : []   // service request: no stock
-      const short: string[] = []
-      for (const l of lines) {
-        const v = vs.find((x: any) => x.id === l.variant_id)
-        if (!v || v.deleted_at) short.push(`${l.sku} (ถูกลบแล้ว)`)
-        else if (v.qty < l.qty) short.push(`${l.sku} ต้องการ ${l.qty} คงเหลือ ${v.qty}`)
+      const short: string[] = [], need = new Map<number, { sku: string; qty: number }>()
+      for (const l of lines) need.set(l.variant_id, { sku: l.sku, qty: (need.get(l.variant_id)?.qty ?? 0) + l.qty })   // same SKU may sit under two types
+      for (const [vid, n] of need) {
+        const v = vs.find((x: any) => x.id === vid)
+        if (!v || v.deleted_at) short.push(`${n.sku} (ถูกลบแล้ว)`)
+        else if (v.qty < n.qty) short.push(`${n.sku} ต้องการ ${n.qty} คงเหลือ ${v.qty}`)
       }
       if (short.length) throw new Error("สต๊อกไม่พอ: " + short.join(", "))
       const dnNo = await nextNo(tx, `DN-${thaiDateStamp()}`)
@@ -748,7 +786,7 @@ async function notifyShipped(r: any): Promise<{ sent: boolean; error: string }> 
   if (!r.email) { await sql`UPDATE uni_requests SET notify_error = ${"ไม่มีอีเมลในคำขอ"} WHERE id = ${r.id}`; return { sent: false, error: "ไม่มีอีเมลในคำขอ" } }
   try {
     const lines = await sql`SELECT * FROM uni_request_lines WHERE request_id = ${r.id} ORDER BY id`
-    const m = shippedEmail(r, (lines.length ? lines : [{ product_name: r.type, size: "", color: "", qty: r.total_qty, unit: "" }]) as any, thaiDate(r.shipped_date))
+    const m = shippedEmail(r, displayRows(r, lines as any, await getSettings()) as any, thaiDate(r.shipped_date))
     await sendMail(r.email, m.subject, m.html)
     await sql`UPDATE uni_requests SET notify_sent_at = NOW(), notify_error = '' WHERE id = ${r.id}`
     console.log("[notify] shipped", r.no, "->", r.email)
@@ -779,7 +817,8 @@ app.get("/api/requests.xlsx", hrOnly, async (c) => {
   const lines = ids.length ? await sql`SELECT * FROM uni_request_lines WHERE request_id IN ${sql(ids)} ORDER BY id` : []
   const origin = new URL(c.req.url).origin.replace(/^http:/, c.req.header("x-forwarded-proto") === "https" ? "https:" : "http:")
   const STATUS: Record<string, string> = { pending: "รออนุมัติ", approved: "อนุมัติแล้ว · รอดำเนินการจัดส่ง", shipped: "จัดส่งแล้ว", rejected: "ไม่อนุมัติ", cancelled: "ยกเลิก" }
-  const items = (r: any) => lines.filter((l: any) => l.request_id === r.id).map((l: any) => `${l.product_name} ${[l.size, l.color].filter(Boolean).join("/")} × ${l.qty}`).join(", ") || `${r.type} × ${r.total_qty}`
+  const settings = await getSettings()
+  const items = (r: any) => displayRows(r, lines.filter((l: any) => l.request_id === r.id) as any, settings).map((l) => `${l.product_name} ${[l.size, l.color].filter(Boolean).join("/")} × ${l.qty}`.replace(/  +/g, " ")).join(", ")
   const d = (v: any) => (v ? new Date(v) : null)
   const wb = new ExcelJS.Workbook()
   wb.creator = "Uniform Stock"
@@ -900,7 +939,8 @@ app.get("/dn/:no", async (c) => {
   if (!r || (me.role !== "hr" && r.requester_id !== me.id)) return c.text("ไม่พบใบส่งสินค้า", 404)
   const lines = await sql`SELECT * FROM uni_request_lines WHERE request_id = ${r.id} ORDER BY id`
   const s = await getSettings()
-  const total = lines.length ? lines.reduce((t: number, l: any) => t + l.qty, 0) : r.total_qty
+  const rows = displayRows(r, lines as any, s)
+  const total = rows.reduce((t: number, l: any) => t + l.qty, 0)
   return c.html(`<!doctype html><html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(r.dn_no)} — ใบส่งสินค้า</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
@@ -933,8 +973,7 @@ app.get("/dn/:no", async (c) => {
     <div class="box"><b>จัดส่งที่</b>สาขา ${esc(r.branch)}${r.note ? `<br>หมายเหตุ: ${esc(r.note)}` : ""}</div>
   </div>
   <table class="items"><thead><tr><th style="width:44px">ลำดับ</th><th>SKU</th><th>รายการ</th><th>ไซส์</th><th>สี</th><th style="width:90px">จำนวน</th></tr></thead><tbody>
-  ${lines.length ? lines.map((l: any, i: number) => `<tr><td class="c">${i + 1}</td><td>${esc(l.sku)}</td><td>${esc(l.product_name)}</td><td class="c">${esc(l.size)}</td><td class="c">${esc(l.color)}</td><td class="n">${l.qty} ${esc(l.unit)}</td></tr>`).join("")
-    : `<tr><td class="c">1</td><td>—</td><td>${esc(r.type)}</td><td class="c"></td><td class="c"></td><td class="n">${r.total_qty}</td></tr>`}
+  ${rows.map((l: any, i: number) => `<tr><td class="c">${i + 1}</td><td>${esc(l.sku) || "—"}</td><td>${esc(l.product_name)}</td><td class="c">${esc(l.size)}</td><td class="c">${esc(l.color)}</td><td class="n">${l.qty} ${esc(l.unit)}</td></tr>`).join("")}
   <tr><td colspan="5" class="n"><b>รวม</b></td><td class="n"><b>${total}</b></td></tr></tbody></table>
   <div class="sign">
     <div><div class="line">ผู้อนุมัติ (HR)</div><div class="muted">${esc(r.approver_name || "")}</div><div class="muted">วันที่ ${esc(thaiDate(r.approved_at))}</div></div>

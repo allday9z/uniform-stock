@@ -146,10 +146,23 @@ table.sizes td .chip { display: inline-block; min-width: 34px; }
 .issued .track { background: #eef1f3; border-radius: 6px; height: 8px; overflow: hidden; margin-top: 6px; } .issued .fill { background: var(--teal); height: 100%; }
 .card.issued { font-size: 14px; }
 .lrow.item { grid-template-columns: 2fr 1.4fr 90px; }
-.lrow.item #itemSku[hidden] + #itemQty { grid-column: span 2; max-width: 120px; }
-#bundleParts .bpart { grid-template-columns: 2fr 1.4fr 90px; }
-#bundleParts .bpart .bpq { grid-column: -2; text-align: right; }
-#bundleParts .bpart .prname { background: transparent; border-color: transparent; padding-left: 0; }
-@media (max-width: 820px) { #bundleParts .bpart { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } #bundleParts .bpart .bpq { grid-column: auto; text-align: right; } #bundleParts .bpart select + .bpq { display: none; } }
-#bundleParts:not(:empty) + .lrow.item #itemName { font-weight: 600; background: transparent; border-color: transparent; }
+.tparts .bpart { grid-template-columns: 2fr 1.4fr 90px; }
+.tparts .bpart .bpq { grid-column: -2; text-align: right; }
+.tparts .bpart .prname { background: transparent; border-color: transparent; padding-left: 0; }
+.tparts:not(:empty) + .lrow.item .tname { font-weight: 600; background: transparent; border-color: transparent; }
+.lrow.item .tsku[hidden] + .tqty { grid-column: span 2; max-width: 120px; }
+.tblock { border: 1px solid var(--line, #e3e8ea); border-radius: 12px; padding: 12px; margin-bottom: 12px; background: #fcfdfd; }
+.tblock .thead { display: flex; gap: 8px; align-items: center; }
+.tblock .thead .ttype { flex: 1; min-width: 0; font-weight: 600; }
+.tblock .tno:empty { display: none; }
+.tblock .tno { font-weight: 700; color: var(--muted, #667); }
+.tblock .thint { margin: 6px 0 10px; }
+.tblock .thint:empty { display: none; }
+.tblock .tshirt, .tblock .titem { margin-top: 8px; }
+.tblock .tsub { margin-top: 6px; font-size: 14px; color: var(--muted, #667); }
+.tblock .tsub:empty { display: none; }
+.addtype { margin-bottom: 12px; }
+.payitem { padding: 6px 0; border-bottom: 1px dashed #dde3e5; } .payitem:last-child { border-bottom: 0; }
+table.lines tr.grp td { background: #f1f6f6; font-weight: 600; font-size: 13px; }
+@media (max-width: 820px) { .tparts .bpart { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .tparts .bpart .bpq { grid-column: auto; text-align: right; } .tparts .bpart select + .bpq { display: none; } }
 .stockwarn { margin-top: 8px; }

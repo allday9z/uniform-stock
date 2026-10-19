@@ -163,6 +163,10 @@ export async function initDB(): Promise<void> {
   await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS by_hr BOOLEAN NOT NULL DEFAULT false`
   await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ`
   await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS edited_by TEXT NOT NULL DEFAULT ''`
+  // Oct 2026 (htask-1792404653804): several request types in one request — items = [{ type, qty, amount }],
+  // each line remembers which type it belongs to. Old rows: items = [] → one item from type/total_qty/amount.
+  await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS items JSONB NOT NULL DEFAULT '[]'::jsonb`
+  await sql`ALTER TABLE uni_request_lines ADD COLUMN IF NOT EXISTS req_type TEXT NOT NULL DEFAULT ''`
   await sql`
     CREATE TABLE IF NOT EXISTS uni_files (
       id          SERIAL PRIMARY KEY,
