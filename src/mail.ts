@@ -7,14 +7,22 @@
 import nodemailer from "nodemailer"
 
 const APP_ORIGIN = process.env.APP_ORIGIN ?? "https://uniform-stock.coolify.pve01.prod.uficon.com"
-const FROM = process.env.SMTP_FROM ?? '"UFicon Uniform (HR)" <no-reply@uficon.com>'
+const SMTP_USER = process.env.SMTP_USER ?? "no-reply@uficon.com"
+// mail.uficon.com only accepts mail whose From is the authenticated account ("550 From address must
+// match authenticated address"). SMTP_FROM came through the env with escaped quotes (\"Name\" <addr>),
+// which nodemailer parsed into a garbage address — so take only the display name from it and always
+// send as SMTP_USER.
+const FROM = {
+  name: (process.env.SMTP_FROM ?? "").replace(/<[^>]*>/g, "").replace(/[\\"]/g, "").trim() || "UFicon Uniform (HR)",
+  address: SMTP_USER,
+}
 
 const transporter = process.env.SMTP_PASSWORD
   ? nodemailer.createTransport({
       host: process.env.SMTP_HOST ?? "mail.uficon.com",
       port: Number(process.env.SMTP_PORT ?? 25),
       secure: false,
-      auth: { user: process.env.SMTP_USER ?? "no-reply@uficon.com", pass: process.env.SMTP_PASSWORD },
+      auth: { user: SMTP_USER, pass: process.env.SMTP_PASSWORD },
       tls: { rejectUnauthorized: false },
     })
   : null
@@ -53,5 +61,5 @@ export function shippedEmail(r: Req, lines: Line[], dateTH: string): { subject: 
 
 export async function sendMail(to: string, subject: string, html: string): Promise<void> {
   if (!transporter) throw new Error("ยังไม่ได้ตั้งค่าอีเมลบนเซิร์ฟเวอร์")
-  await transporter.sendMail({ from: FROM, to, subject, html })
+  await transporter.sendMail({ from: FROM, envelope: { from: SMTP_USER, to }, to, subject, html })
 }
