@@ -147,4 +147,9 @@ table.sizes td .chip { display: inline-block; min-width: 34px; }
 .card.issued { font-size: 14px; }
 .lrow.item { grid-template-columns: 2fr 1.4fr 90px; }
 .lrow.item #itemSku[hidden] + #itemQty { grid-column: span 2; max-width: 120px; }
+#bundleParts .bpart { grid-template-columns: 2fr 1.4fr 90px; }
+#bundleParts .bpart .bpq { grid-column: -2; text-align: right; }
+#bundleParts .bpart .prname { background: transparent; border-color: transparent; padding-left: 0; }
+@media (max-width: 820px) { #bundleParts .bpart { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } #bundleParts .bpart .bpq { grid-column: auto; text-align: right; } #bundleParts .bpart select + .bpq { display: none; } }
+#bundleParts:not(:empty) + .lrow.item #itemName { font-weight: 600; background: transparent; border-color: transparent; }
 .stockwarn { margin-top: 8px; }

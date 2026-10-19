@@ -158,6 +158,11 @@ export async function initDB(): Promise<void> {
   await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS shipped_date DATE`
   await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS notify_sent_at TIMESTAMPTZ`
   await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS notify_error TEXT NOT NULL DEFAULT ''`
+  // Oct 2026 (htask-1792403578765): photo of the damaged item, HR edits / requests made by HR for an employee.
+  await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS photo_file_id INT`
+  await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS by_hr BOOLEAN NOT NULL DEFAULT false`
+  await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ`
+  await sql`ALTER TABLE uni_requests ADD COLUMN IF NOT EXISTS edited_by TEXT NOT NULL DEFAULT ''`
   await sql`
     CREATE TABLE IF NOT EXISTS uni_files (
       id          SERIAL PRIMARY KEY,

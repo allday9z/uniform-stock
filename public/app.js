@@ -264,9 +264,13 @@
   // ---------- new request (everyone) — catalog has NO stock numbers ----------
   // Types with a fixed number of shirts must add up to exactly that number;
   // "ซื้อเสื้อเพิ่ม" shows the amount, then a payment step (ask HR first, slip upload).
-  async function viewNew() {
-    var cat = await api("/api/catalog"); var s = state.settings; var me = state.me;
+  // q.edit = request no → HR edits that pending request. HR filling the form = on behalf of an employee.
+  async function viewNew(q) {
+    var cat = await api("/api/catalog"); var s = state.settings; var me = state.me, hr = isHR();
+    var edit = hr && q && q.edit ? await api("/api/requests/" + encodeURIComponent(q.edit)) : null;
+    if (edit && edit.status !== "pending") { setView('<div class="card empty">แก้ไขได้เฉพาะคำขอที่รออนุมัติ — คำขอ ' + esc(edit.no) + " " + esc(RSTATUS[edit.status]) + "แล้ว</div>"); return; }
     var draft = {}; try { draft = JSON.parse(localStorage.getItem("uni_last_form") || "{}"); } catch (e) {}
+    if (hr) { draft = edit ? { name: edit.name, position: edit.position, dept: edit.dept, phone: edit.phone, email: edit.email, branch: edit.branch } : {}; me = { name: "", emp_code: edit ? edit.emp_code : "", branch: "", position: "", dept: "", phone: "", email: "" }; }
     var v = function (k, fallback) { return esc(draft[k] != null && draft[k] !== "" ? draft[k] : fallback || ""); };
     var pick = function (k, fallback) { return draft[k] != null && draft[k] !== "" ? draft[k] : fallback || ""; };
     function dropdown(id, list, cur, placeholder) {
@@ -278,11 +282,16 @@
     // Products linked to lanyard / card holder / ID card are not shirts.
     var linkedIds = Object.keys(s.itemProducts || {}).map(function (k) { return s.itemProducts[k]; }).filter(function (x) { return x; });
     var allProducts = cat, shirts = cat.filter(function (p) { return linkedIds.indexOf(p.id) === -1; });
-    function itemProduct(t) { var id = t && t.item !== "shirt" ? (s.itemProducts || {})[t.item] : null; return id ? allProducts.find(function (p) { return p.id === id; }) || null : null; }
+    function productFor(item) { var id = (s.itemProducts || {})[item]; return id ? allProducts.find(function (p) { return p.id === id; }) || null : null; }
+    function itemProduct(t) { return t && t.item !== "shirt" && !t.bundle ? productFor(t.item) : null; }
+    // A bundle (e.g. lanyard + holder + card): the linked stock products of its items, one of each per set.
+    function bundleParts(t) { return t && t.bundle ? t.bundle.map(function (it) { return { item: it, p: productFor(it) }; }) : []; }
+    var ITEM_NAMES = {}; (s.items || []).forEach(function (x) { ITEM_NAMES[x.key] = x.label; });
     function amountFor(t, n) { return !t ? 0 : t.item === "shirt" ? (t.purchase ? priceFor(n) : 0) : n * (t.price || 0); }
-    setView('<h1>ขอเบิก / สั่งซื้อ</h1><p class="sub">เสื้อยูนิฟอร์ม · สายคล้องคอ · กรอบบัตร · บัตรพนักงาน — กรอกข้อมูลแล้วกดส่ง HR จะตรวจสอบและอนุมัติ แล้วจัดส่งไปยังสาขาที่เลือก พร้อมแจ้งทางอีเมล</p>' +
+    setView((edit ? '<h1>แก้ไขคำขอ ' + esc(edit.no) + '</h1><p class="sub">HR แก้ไขข้อมูล/รายการแทนพนักงาน — สต๊อกจะถูกตัดตามรายการที่แก้ไขเมื่อกดอนุมัติ</p>'
+        : '<h1>ขอเบิก / สั่งซื้อ</h1><p class="sub">' + (hr ? "HR กรอกคำขอเบิกแทนพนักงานได้ — ใส่ข้อมูลของพนักงานที่ต้องการเบิก แล้วอนุมัติที่เมนู “คำขอเบิก” ระบบจะตัดสต๊อกตามจริง" : "เสื้อยูนิฟอร์ม · สายคล้องคอ · กรอบบัตร · บัตรพนักงาน — กรอกข้อมูลแล้วกดส่ง HR จะตรวจสอบและอนุมัติ แล้วจัดส่งไปยังสาขาที่เลือก พร้อมแจ้งทางอีเมล") + "</p>") +
       '<div class="card"><h3 style="margin-top:0">ข้อมูลพนักงาน</h3><div class="grid3">' +
-      field("วันที่ขอ", '<input class="i" type="date" id="reqDate" value="' + today() + '">', true) +
+      field("วันที่ขอ", '<input class="i" type="date" id="reqDate" value="' + (edit ? esc(String(edit.req_date).slice(0, 10)) : today()) + '">', true) +
       field("ชื่อ-นามสกุล", '<input class="i" id="name" value="' + v("name", me.name) + '">', true) +
       field("รหัสพนักงาน", '<input class="i" id="code" value="' + esc(me.emp_code) + '">', true) +
       field("ตำแหน่ง", posInput, true) +
@@ -294,10 +303,12 @@
       "</div></div>" +
       '<div class="card"><h3 style="margin-top:0" id="itemTitle">รายละเอียดรายการ</h3><p class="small muted" id="typeHint" style="margin:-4px 0 10px">เลือกประเภทการเบิกก่อน</p>' +
       '<div id="shirtBlock">' + (shirts.length ? "" : '<div class="note red">ยังไม่มีรายการเสื้อในระบบ — กรุณาติดต่อ HR</div>') + '<div id="lines"></div><button class="btn sm ghost" id="addLine">+ เพิ่มไซส์</button></div>' +
-      '<div id="itemBlock" hidden><div class="lrow item"><div class="i prname" id="itemName"></div><select class="i" id="itemSku" hidden></select><input class="i" id="itemQty" type="number" min="1" max="99" step="1" value="1" aria-label="จำนวน"></div></div>' +
+      '<div id="itemBlock" hidden><div id="bundleParts"></div><div class="lrow item"><div class="i prname" id="itemName"></div><select class="i" id="itemSku" hidden></select><input class="i" id="itemQty" type="number" min="1" max="99" step="1" value="1" aria-label="จำนวน"></div></div>' +
       '<div class="totalbox" id="totalBox"></div><div class="note red stockwarn" id="stockWarn" hidden></div>' +
+      '<div class="field" id="photoBlock" hidden style="margin-top:14px"><label class="f' + (hr ? "" : " req") + '">ถ่ายรูปของที่ชำรุดแนบมา</label><input class="i" type="file" id="photo" accept="image/*">' +
+      (edit && edit.photo_file_id ? '<p class="small muted" style="margin:4px 0 0">มีรูปแนบแล้ว — <a href="/api/files/' + edit.photo_file_id + '" target="_blank">เปิดดู</a> (เลือกไฟล์ใหม่เพื่อเปลี่ยน)</p>' : "") + '<div id="photoPrev"></div></div>' +
       '<div class="field" style="margin-top:14px"><label class="f">หมายเหตุ</label><textarea class="i" id="note" rows="2"></textarea></div>' +
-      '<div class="err" id="err"></div><button class="btn" id="submit">ส่งคำขอเบิก</button></div>');
+      '<div class="err" id="err"></div>' + (edit ? '<div class="row"><a class="btn ghost" href="#/requests">ยกเลิก</a><button class="btn" id="submit">บันทึกการแก้ไข</button></div>' : '<button class="btn" id="submit">ส่งคำขอเบิก</button>') + "</div>");
     var lines = $("#lines");
     var single = shirts.length === 1 ? shirts[0] : null; cat = shirts;   // the size lines list shirts only
     function sizeOptions(p) { return '<option value="">-- เลือกไซส์ (รอบอก) --</option>' + p.variants.map(function (x) { return '<option value="' + x.id + '">' + esc(vlabel(x)) + "</option>"; }).join(""); }
@@ -316,6 +327,13 @@
     }
     function isItem() { var t = typeOf($("#type").value); return !!t && t.item !== "shirt"; }
     function collect() {
+      var bt = typeOf($("#type").value);
+      if (bt && bt.bundle) {   // one line per linked part, quantity = number of sets
+        return bundleParts(bt).filter(function (x) { return x.p; }).map(function (x) {
+          var sel = $('#bundleParts select[data-pid="' + x.p.id + '"]');
+          return { variant_id: x.p.variants.length === 1 ? x.p.variants[0].id : sel ? sel.value : "", qty: $("#itemQty").value };
+        }).filter(function (l) { return l.variant_id; });
+      }
       if (isItem()) {
         var p = itemProduct(typeOf($("#type").value)); if (!p) return [];   // service: quantity only
         var vid = p.variants.length === 1 ? p.variants[0].id : $("#itemSku").value;
@@ -337,18 +355,19 @@
     function renderWarn() {
       var w = $("#stockWarn"); if (!w) return;
       w.hidden = !stockShort.length;
-      w.innerHTML = stockShort.length ? "<b>สต๊อกคงเหลือไม่เพียงพอ โปรดติดต่อ People Team</b><br>" + stockShort.map(function (x) { return esc(x.label); }).join(", ") : "";
+      w.innerHTML = stockShort.length ? "<b>" + (hr ? "สต๊อกคงเหลือไม่พอ — บันทึกคำขอได้ แต่ต้องรับสินค้าเข้าก่อนจึงจะอนุมัติได้" : "สต๊อกคงเหลือไม่เพียงพอ โปรดติดต่อ People Team") + "</b><br>" + stockShort.map(function (x) { return esc(x.label); }).join(", ") : "";
     }
     function update() {
       scheduleCheck();
       var t = typeOf($("#type").value), n = totalQty(), box = $("#totalBox");
       $("#shirtBlock").hidden = !!(t && t.item !== "shirt"); $("#itemBlock").hidden = !(t && t.item !== "shirt");
+      $("#photoBlock").hidden = !(t && t.photo);
       if (!t) { $("#typeHint").textContent = "เลือกประเภทการเบิกก่อน"; $("#itemTitle").textContent = "รายละเอียดรายการ"; box.innerHTML = ""; $("#submit").textContent = "ส่งคำขอเบิก"; return; }
       if (t.item !== "shirt") {
         var amt = amountFor(t, n), ip = itemProduct(t);
         $("#itemTitle").textContent = "รายละเอียด: " + t.label;
-        $("#typeHint").textContent = t.price ? "ราคา " + money(t.price) + " บาท / ชิ้น — ระบุจำนวน ระบบคำนวณยอดชำระให้" : "ไม่มีค่าใช้จ่าย — ระบุจำนวน";
-        box.innerHTML = n > 0 ? 'จำนวน <b>' + n + '</b>' + (amt ? ' · ยอดชำระ <b class="amt">' + money(amt) + ' บาท</b>' : " · ไม่มีค่าใช้จ่าย") : "ระบุจำนวน";
+        $("#typeHint").textContent = (t.price ? "ราคา " + money(t.price) + " บาท / " + (t.bundle ? "ชุด" : "ชิ้น") + " — ระบุจำนวน ระบบคำนวณยอดชำระให้" : "ไม่มีค่าใช้จ่าย — ระบุจำนวน") + (t.photo ? " · ถ่ายรูปของที่ชำรุดแนบมาด้วย" : "");
+        box.innerHTML = n > 0 ? 'จำนวน <b>' + n + '</b>' + (t.bundle ? " ชุด" : "") + (amt ? ' · ยอดชำระ <b class="amt">' + money(amt) + ' บาท</b>' : " · ไม่มีค่าใช้จ่าย") : "ระบุจำนวน";
         $("#submit").textContent = amt > 0 ? "ถัดไป: ชำระเงิน →" : "ส่งคำขอเบิก";
         return;
       }
@@ -368,17 +387,53 @@
     $("#itemQty").oninput = update; $("#itemSku").onchange = update;
     $("#type").onchange = function () {
       var t = typeOf(this.value);
-      if (t && t.item !== "shirt") {
-        var ip = itemProduct(t);
-        $("#itemName").textContent = ip ? ip.name : t.label;
-        var sku = $("#itemSku"); sku.hidden = !(ip && ip.variants.length > 1);
-        sku.innerHTML = ip && ip.variants.length > 1 ? '<option value="">-- เลือกแบบ --</option>' + ip.variants.map(function (x) { return '<option value="' + x.id + '">' + esc(vlabel(x)) + "</option>"; }).join("") : "";
-        $("#itemQty").value = 1;
-      }
+      if (t && t.item !== "shirt") setItem(t);
       // One size line with the entitled quantity is the common case — prefill it.
       if (t && t.qty && $$("#lines .lrow").length === 1) $(".qt", lines.children[0]).value = t.qty;
       update();
     };
+    function variantOptions(p) { return '<option value="">-- เลือกแบบ --</option>' + p.variants.map(function (x) { return '<option value="' + x.id + '">' + esc(vlabel(x)) + "</option>"; }).join(""); }
+    function setItem(t) {
+      var ip = itemProduct(t), sku = $("#itemSku");
+      $("#itemName").textContent = t.bundle ? "จำนวนชุด" : ip ? ip.name : t.label;
+      sku.hidden = !(ip && ip.variants.length > 1);
+      sku.innerHTML = ip && ip.variants.length > 1 ? variantOptions(ip) : "";
+      // Bundle: what one set contains; parts with several SKUs get a picker.
+      $("#bundleParts").innerHTML = bundleParts(t).map(function (x) {
+        var name = x.p ? x.p.name : ITEM_NAMES[x.item] || x.item;
+        return '<div class="lrow item bpart"><div class="i prname">' + esc(name) + '</div>' + (x.p && x.p.variants.length > 1 ? '<select class="i" data-pid="' + x.p.id + '">' + variantOptions(x.p) + "</select>" : "") +
+          '<div class="small muted bpq">' + (x.p ? "1 / ชุด" : "1 / ชุด · ไม่ตัดสต๊อก") + "</div></div>";
+      }).join("");
+      $$("#bundleParts select").forEach(function (el) { el.onchange = update; });
+      $("#itemQty").value = 1;
+    }
+    var photoFile = null;
+    $("#photo").onchange = async function () {
+      photoFile = null; $("#photoPrev").innerHTML = ""; var f = this.files[0]; if (!f) return;
+      try { photoFile = await shrinkImage(f); } catch (e) { photoFile = f; }
+      if (photoFile.size > 6 * 1024 * 1024) { $("#err").textContent = "รูปใหญ่เกิน 6 MB"; photoFile = null; this.value = ""; return; }
+      $("#photoPrev").innerHTML = '<img class="slipimg" src="' + URL.createObjectURL(photoFile) + '" alt="รูปของที่ชำรุด">';
+    };
+    // Edit: prefill type, lines and quantities from the request.
+    if (edit) {
+      $("#code").value = edit.emp_code; $("#note").value = edit.note || "";
+      var et = typeOf(edit.type);
+      if (et) {
+        $("#type").value = edit.type;
+        if (et.item !== "shirt") {
+          setItem(et); $("#itemQty").value = edit.total_qty;
+          edit.lines.forEach(function (l) { var sel = $('#bundleParts select[data-pid="' + l.product_id + '"]'); if (sel) sel.value = l.variant_id; if (!et.bundle) $("#itemSku").value = l.variant_id; });
+        } else if (edit.lines.length) {
+          lines.innerHTML = "";
+          edit.lines.forEach(function (l) {
+            addLine(); var row = lines.lastChild, pr = $(".pr", row);
+            if (pr) { pr.value = l.product_id; pr.onchange(); }
+            $(".va", row).value = l.variant_id; $(".qt", row).value = l.qty;
+          });
+        }
+      }
+      update();
+    }
     function body() {
       return { req_date: $("#reqDate").value, name: $("#name").value, emp_code: $("#code").value, position: $("#position").value, dept: $("#dept").value, phone: $("#phone").value, email: $("#email").value.trim(), branch: $("#branch").value, type: $("#type").value, note: $("#note").value, lines: collect(), qty: totalQty() };
     }
@@ -398,32 +453,48 @@
       if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(b.email)) missing.push("อีเมล");
       if (!t) missing.push("ประเภทการเบิก");
       else if (t.item === "shirt" && !b.lines.length) missing.push("ไซส์และจำนวนเสื้อ");
+      else if (t.bundle && b.lines.length < bundleParts(t).filter(function (x) { return x.p; }).length) missing.push("แบบของแต่ละรายการในชุด");
       else if (t.item !== "shirt" && itemProduct(t) && !b.lines.length) missing.push("แบบของ " + t.label);
       else if (t.item !== "shirt" && !(b.qty >= 1 && b.qty <= 99)) missing.push("จำนวน (1–99)");
+      if (t && t.photo && !hr && !photoFile) missing.push("รูปของที่ชำรุด");
       if (missing.length) { $("#err").textContent = "กรุณากรอก: " + missing.join(", "); return; }
       var n = totalQty();
       if (t.qty && n !== t.qty) { $("#err").textContent = "ประเภทนี้เบิกได้ " + t.qty + " ตัว (ตอนนี้เลือก " + n + " ตัว)"; return; }
       if (b.lines.length) {   // re-check right before submitting / paying
         try { var chk = await api("/api/stock-check", { method: "POST", body: { lines: b.lines } }); stockShort = chk.short || []; renderWarn(); } catch (e) {}
-        if (stockShort.length) { $("#err").textContent = "สต๊อกคงเหลือไม่เพียงพอ โปรดติดต่อ People Team"; return; }
+        if (stockShort.length && !hr) { $("#err").textContent = "สต๊อกคงเหลือไม่เพียงพอ โปรดติดต่อ People Team"; return; }
       }
       $("#err").textContent = "";
       if (amountFor(t, n) > 0) return paymentStep(b, n, t);
       busy(this, true);
-      try { var r = await api("/api/requests", { method: "POST", body: b }); remember(b); done(r.no, false); }
+      try { var r = await send(b, null); finish(r, b, false); }
       catch (e) { $("#err").textContent = e.message; busy(this, false); }
     };
+    // POST a new request, or PUT the edited one; multipart when a file goes along.
+    function send(data, slip) {
+      var fd = new FormData(); fd.append("data", JSON.stringify(data));
+      if (slip) fd.append("slip", slip, slip.name || "slip.jpg");
+      if (photoFile) fd.append("photo", photoFile, photoFile.name || "photo.jpg");
+      return api(edit ? "/api/requests/" + encodeURIComponent(edit.no) : "/api/requests", { method: edit ? "PUT" : "POST", body: fd });
+    }
+    function finish(r, b, purchase) {
+      closeModal();
+      if (edit) { toast("บันทึกการแก้ไขคำขอ " + edit.no + " แล้ว"); location.hash = "#/requests"; return; }
+      if (!hr) remember(b);
+      done(r.no, purchase);
+    }
     // Step 2 for purchases: amount, how to pay, "ask HR first", payment slip.
     function paymentStep(b, n, t) {
       var amount = amountFor(t, n), shirt = t.item === "shirt";
       var items = b.lines.length ? b.lines.map(function (l) { var x = null; allProducts.forEach(function (p) { p.variants.forEach(function (vv) { if (String(vv.id) === String(l.variant_id)) x = { p: p, v: vv }; }); }); return x ? esc(x.p.name) + (x.p.variants.length > 1 || shirt ? " · " + esc(vlabel(x.v)) : "") + " × " + Number(l.qty) : ""; }).join("<br>") : esc(t.label) + " × " + n;
       var mb = modal('<h2>ชำระเงิน — ' + esc(t.label) + '</h2>' +
-        '<div class="paybox"><div>' + items + '</div><div class="payamt">ยอดชำระ <b>' + money(amount) + ' บาท</b><span class="muted small">(' + n + (shirt ? " ตัว" : " ชิ้น") + ')</span></div></div>' +
-        '<div class="note red"><b>ก่อนชำระเงิน</b> กรุณาสอบถาม HR เพื่อตรวจสอบจำนวนคงเหลือ' + (shirt ? "และไซซ์ที่ต้องการ" : "") + 'ก่อน</div>' +
+        '<div class="paybox"><div>' + items + '</div><div class="payamt">ยอดชำระ <b>' + money(amount) + ' บาท</b><span class="muted small">(' + n + (shirt ? " ตัว" : t.bundle ? " ชุด" : " ชิ้น") + ')</span></div></div>' +
+        (hr ? '<div class="note">HR บันทึกแทนพนักงาน — แนบหลักฐานการชำระเงินได้ถ้ามี (ไม่บังคับ)' + (edit && edit.slip_file_id ? ' · มีสลิปเดิมแล้ว <a href="/api/files/' + edit.slip_file_id + '" target="_blank">เปิดดู</a>' : "") + "</div>"
+          : '<div class="note red"><b>ก่อนชำระเงิน</b> กรุณาสอบถาม HR เพื่อตรวจสอบจำนวนคงเหลือ' + (shirt ? "และไซซ์ที่ต้องการ" : "") + 'ก่อน</div>' +
         (s.payInfo ? '<div class="note"><b>ช่องทางการชำระเงิน</b><br>' + esc(s.payInfo).replace(/\n/g, "<br>") + "</div>" : '<div class="note">สอบถามช่องทางการชำระเงินกับ HR</div>') +
-        '<label class="ack"><input type="checkbox" id="ack"> สอบถาม HR เรื่องจำนวนคงเหลือ' + (shirt ? "และไซซ์" : "") + 'แล้ว</label>' +
-        field("แนบหลักฐานการชำระเงิน (รูปภาพ หรือ PDF)", '<input class="i" type="file" id="slip" accept="image/*,application/pdf">', true) + '<div id="slipPrev"></div>' +
-        '<div class="err" id="perr"></div><div class="actions"><button class="btn ghost" id="back">← แก้ไขรายการ</button><button class="btn" id="pay">ส่งคำสั่งซื้อ</button></div>');
+        '<label class="ack"><input type="checkbox" id="ack"> สอบถาม HR เรื่องจำนวนคงเหลือ' + (shirt ? "และไซซ์" : "") + 'แล้ว</label>') +
+        field("แนบหลักฐานการชำระเงิน (รูปภาพ หรือ PDF)", '<input class="i" type="file" id="slip" accept="image/*,application/pdf">', !hr) + '<div id="slipPrev"></div>' +
+        '<div class="err" id="perr"></div><div class="actions"><button class="btn ghost" id="back">← แก้ไขรายการ</button><button class="btn" id="pay">' + (edit ? "บันทึกการแก้ไข" : "ส่งคำสั่งซื้อ") + '</button></div>');
       var file = null;
       $("#back", mb).onclick = closeModal;
       $("#slip", mb).onchange = async function () {
@@ -434,13 +505,10 @@
         $("#slipPrev", mb).innerHTML = /^image\//.test(file.type) ? '<img class="slipimg" src="' + URL.createObjectURL(file) + '" alt="หลักฐานการชำระเงิน">' : '<p class="small muted">' + esc(f.name) + "</p>";
       };
       $("#pay", mb).onclick = async function () {
-        if (!$("#ack", mb).checked) { $("#perr", mb).textContent = "กรุณายืนยันว่าสอบถาม HR แล้ว"; return; }
-        if (!file) { $("#perr", mb).textContent = "กรุณาแนบหลักฐานการชำระเงิน"; return; }
+        if (!hr && !$("#ack", mb).checked) { $("#perr", mb).textContent = "กรุณายืนยันว่าสอบถาม HR แล้ว"; return; }
+        if (!hr && !file) { $("#perr", mb).textContent = "กรุณาแนบหลักฐานการชำระเงิน"; return; }
         busy(this, true);
-        var fd = new FormData();
-        fd.append("data", JSON.stringify(Object.assign({}, b, { ack_hr: true, amount: amount })));
-        fd.append("slip", file, file.name || "slip.jpg");
-        try { var r = await api("/api/requests", { method: "POST", body: fd }); remember(b); closeModal(); done(r.no, true); }
+        try { var r = await send(Object.assign({}, b, { ack_hr: !hr || undefined, amount: amount }), file); finish(r, b, true); }
         catch (e) { $("#perr", mb).textContent = e.message; busy(this, false); }
       };
     }
@@ -483,23 +551,34 @@
         if (act === "ship") return shipDialog(r, false);
         if (act === "shipdate") return shipDialog(r, true);
         if (act === "slip") return window.open("/api/files/" + r.slip_file_id, "_blank");
+        if (act === "photo") return window.open("/api/files/" + r.photo_file_id, "_blank");
+        if (act === "edit") { location.hash = "#/new?edit=" + encodeURIComponent(r.no); return; }
         if (act === "notify") return doAct("/api/requests/" + encodeURIComponent(r.no) + "/notify", "ส่งอีเมลแจ้งพนักงานแล้ว");
       };
     });
   }
   async function doAct(url, msg, body) { try { await api(url, { method: "POST", body: body || {} }); toast(msg); route(); } catch (e) { alert(e.message); } }
 
+  // Bundle items with no linked stock product (e.g. the ID card in an ID set) — listed, not cut from stock.
+  function serviceParts(r) {
+    var t = typeOf(r.type); if (!t || !t.bundle || !r.lines.length) return "";
+    var names = {}; (state.settings.items || []).forEach(function (x) { names[x.key] = x.label; });
+    return t.bundle.filter(function (it) { return !(state.settings.itemProducts || {})[it]; }).map(function (it) {
+      return "<tr><td>" + esc(names[it] || it) + '</td><td class="muted">ไม่ตัดสต๊อก</td><td></td><td class="n">' + r.total_qty + "</td>" + (isHR() && r.status === "pending" ? "<td></td>" : "") + "</tr>";
+    }).join("");
+  }
   function reqCard(r) {
     var hr = isHR(), pend = r.status === "pending";
     var lines = '<div class="scroll"><table class="t lines"><thead><tr><th>รายการ</th><th>SKU</th><th>ไซส์ / สี</th><th class="n">จำนวน</th>' + (hr && pend ? '<th class="n">คงเหลือ</th>' : "") + "</tr></thead><tbody>" +
       (r.lines.length ? r.lines.map(function (l) { return "<tr><td>" + esc(l.product_name) + "</td><td>" + esc(l.sku) + "</td><td>" + esc([l.size, l.color].filter(Boolean).join(" / ")) + '</td><td class="n">' + l.qty + " " + esc(l.unit) + "</td>" + (hr && pend ? '<td class="n' + (l.available < l.qty ? " short" : "") + '">' + l.available + "</td>" : "") + "</tr>"; }).join("")
-        : "<tr><td>" + esc(r.type) + '</td><td class="muted">ไม่ตัดสต๊อก</td><td></td><td class="n">' + r.total_qty + "</td>" + (hr && pend ? "<td></td>" : "") + "</tr>") + "</tbody></table></div>";
+        : "<tr><td>" + esc(r.type) + '</td><td class="muted">ไม่ตัดสต๊อก</td><td></td><td class="n">' + r.total_qty + "</td>" + (hr && pend ? "<td></td>" : "") + "</tr>") + serviceParts(r) + "</tbody></table></div>";
     var acts = [];
-    if (pend && hr) { acts.push('<button class="btn sm" data-act="approve" data-no="' + esc(r.no) + '">อนุมัติและออกใบส่งสินค้า</button>'); acts.push('<button class="btn sm danger" data-act="reject" data-no="' + esc(r.no) + '">ไม่อนุมัติ</button>'); }
+    if (pend && hr) { acts.push('<button class="btn sm" data-act="approve" data-no="' + esc(r.no) + '">อนุมัติและออกใบส่งสินค้า</button>'); acts.push('<button class="btn sm ghost" data-act="edit" data-no="' + esc(r.no) + '">แก้ไข</button>'); acts.push('<button class="btn sm danger" data-act="reject" data-no="' + esc(r.no) + '">ไม่อนุมัติ</button>'); }
     if (pend && r.mine) acts.push('<button class="btn sm ghost" data-act="cancel" data-no="' + esc(r.no) + '">ยกเลิกคำขอ</button>');
     if (r.status === "approved" || r.status === "shipped") acts.push('<button class="btn sm ghost" data-act="dn" data-no="' + esc(r.no) + '">ดูใบส่งสินค้า</button>');
     if (r.status === "approved" && hr) acts.push('<button class="btn sm" data-act="ship" data-no="' + esc(r.no) + '">อัปเดตเป็น "จัดส่งแล้ว"</button>');
     if (r.status === "shipped" && hr) acts.push('<button class="btn sm ghost" data-act="shipdate" data-no="' + esc(r.no) + '">แก้วันที่จัดส่ง</button>');
+    if (r.photo_file_id) acts.push('<button class="btn sm ghost" data-act="photo" data-no="' + esc(r.no) + '">ดูรูปของที่ชำรุด</button>');
     if (r.slip_file_id) acts.push('<button class="btn sm ghost" data-act="slip" data-no="' + esc(r.no) + '">ดูหลักฐานการชำระเงิน</button>');
     if (r.status === "shipped" && hr && !r.notify_sent_at && r.email) acts.push('<button class="btn sm ghost" data-act="notify" data-no="' + esc(r.no) + '">ส่งอีเมลแจ้งอีกครั้ง</button>');
     return '<div class="card reqcard"><h3>' + esc(r.no) + ' <span class="badge ' + r.status + '">' + RSTATUS[r.status] + "</span>" + (r.dn_no ? ' <span class="muted small">' + esc(r.dn_no) + "</span>" : "") + '<span class="spacer"></span><span class="muted small">' + thDateTime(r.created_at) + "</span></h3>" +
@@ -509,6 +588,7 @@
       "<div><span>สถานะการจัดส่ง</span> " + deliveryLine(r) + "</div>" +
       (hr && r.status === "shipped" ? "<div><span>แจ้งอีเมล</span> " + (r.notify_sent_at ? '<span class="badge shipped">ส่งแล้ว</span> ' + thDateTime(r.notify_sent_at) : r.notify_error ? '<span class="badge rejected">ส่งไม่สำเร็จ</span> <span class="small muted">' + esc(r.notify_error) + "</span>" : '<span class="muted">—</span>') + "</div>" : "") + "</div>" +
       lines + (r.note ? '<div class="note">หมายเหตุ: ' + esc(r.note) + "</div>" : "") + (r.status === "rejected" && r.decision_note ? '<div class="note red">เหตุผลที่ไม่อนุมัติ: ' + esc(r.decision_note) + "</div>" : "") +
+      (r.by_hr || r.edited_at ? '<p class="small muted" style="margin:8px 0 0">' + [r.by_hr ? "HR บันทึกแทนพนักงาน" : "", r.edited_at ? "แก้ไขล่าสุด " + thDateTime(r.edited_at) + (r.edited_by ? " โดย " + esc(r.edited_by) : "") : ""].filter(Boolean).join(" · ") + "</p>" : "") +
       (r.approved_at ? '<p class="small muted" style="margin:8px 0 0">อนุมัติ ' + thDateTime(r.approved_at) + (r.approver_name ? " โดย " + esc(r.approver_name) : "") + (r.shipped_at ? " · จัดส่ง " + thDateTime(r.shipped_at) : "") + "</p>" : "") +
       (acts.length ? '<div class="row" style="margin-top:12px">' + acts.join("") + "</div>" : "") + "</div>";
   }
@@ -596,7 +676,7 @@
       field("ช่องทางการชำระเงิน (แสดงตอนพนักงานกดชำระเงิน)", '<textarea class="i" id="pi" rows="5" placeholder="เช่น โอนเข้าบัญชี … ธนาคาร … เลขที่ … ชื่อบัญชี …">' + esc(s.payInfo || "") + "</textarea>", false) + "</div>" +
       '<h3>สายคล้องคอ / กรอบบัตร / บัตรพนักงาน</h3>' +
       '<p class="small muted">ราคาต่อชิ้น (0 = ไม่มีค่าใช้จ่าย ไม่ต้องชำระเงิน) และสินค้าในสต๊อกที่ใช้ตัดยอดเมื่ออนุมัติ — ถ้าไม่ผูก จะไม่ตัดสต๊อก (เช่น ออกบัตรใหม่) · สินค้าที่ผูกไว้จะไม่แสดงในรายการเสื้อ</p>' +
-      '<div class="grid2">' + priceRows.map(function (t) { return field(esc(t.label) + " (บาท / ชิ้น)", '<input class="i" type="number" min="0" step="1" data-price="' + t.priceKey + '" value="' + (t.price || 0) + '">', false); }).join("") + "</div>" +
+      '<div class="grid2">' + priceRows.map(function (t) { return field(esc(t.label) + (t.bundle ? " (บาท / ชุด)" : " (บาท / ชิ้น)"), '<input class="i" type="number" min="0" step="1" data-price="' + t.priceKey + '" value="' + (t.price || 0) + '">', false); }).join("") + "</div>" +
       '<div class="grid3">' + linkSel("lanyard", "สินค้าในสต๊อก: สายคล้องคอ") + linkSel("cardholder", "สินค้าในสต๊อก: กรอบบัตร") + linkSel("idcard", "สินค้าในสต๊อก: บัตรพนักงาน") + "</div>" +
       '<p class="small muted">อีเมลแจ้งพนักงานเมื่อจัดส่งแล้ว: ' + (s.mailEnabled ? '<span class="badge shipped">เปิดใช้งาน</span> (ส่งจาก no-reply@uficon.com)' : '<span class="badge rejected">ยังไม่ได้ตั้งค่า</span>') + "</p>" +
       '<div class="err" id="err"></div><button class="btn" id="save">บันทึกการตั้งค่า</button></div>');
@@ -659,7 +739,7 @@
       renderShell();
       var p = r.path;
       if (p === "/" || p === "/login" || p === "/register" || p === "/setup") { location.replace(isHR() ? "#/requests" : "#/new"); return; }
-      if (p === "/new") return await viewNew();
+      if (p === "/new") return await viewNew(r.q);
       if (p === "/requests") return await viewRequests(r.q);
       if (p === "/history") return await viewHistory(r.q);
       if (isHR()) {

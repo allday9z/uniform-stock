@@ -28,8 +28,9 @@ const HR_SETUP_CODE = process.env.HR_SETUP_CODE ?? ""
 //  other items (lanyard / card holder / ID card): quantity × unit price (prices editable
 //  in settings). An item draws stock from the product HR links to it in settings; an
 //  item with no linked product (e.g. issuing a new ID card) is a service — no stock.
-type Item = "shirt" | "lanyard" | "cardholder" | "idcard"
-type RequestType = { label: string; item: Item; qty?: number; purchase?: boolean; priceKey?: string; price?: number }
+type Item = "shirt" | "lanyard" | "cardholder" | "idcard" | "idset"
+// bundle: the items a set is made of (stock is cut for each linked one); photo: a photo of the damaged item is required.
+type RequestType = { label: string; item: Item; qty?: number; purchase?: boolean; priceKey?: string; price?: number; bundle?: Item[]; photo?: boolean }
 const ITEMS: { key: Item; label: string }[] = [
   { key: "shirt", label: "เสื้อยูนิฟอร์ม" }, { key: "lanyard", label: "สายคล้องคอ" }, { key: "cardholder", label: "กรอบบัตร" }, { key: "idcard", label: "บัตรพนักงาน" },
 ]
@@ -39,9 +40,10 @@ const REQUEST_TYPES: RequestType[] = [
   { label: "พนักงานผ่านทดลองงาน (3 ตัว)", item: "shirt", qty: 3 },
   { label: "พนักงานต่อสัญญาจ้าง (3 ตัว)", item: "shirt", qty: 3 },
   { label: "พนักงานต้องการซื้อเสื้อเพิ่ม", item: "shirt", purchase: true },
-  { label: "สายคล้องคอ", item: "lanyard", priceKey: "lanyard", price: 50 },
+  { label: "ชุดบัตรพนักงาน สาย+กรอบ+บัตร (กรณีสูญหาย)", item: "idset", priceKey: "idset_lost", price: 300, bundle: ["lanyard", "cardholder", "idcard"] },
+  { label: "สายคล้องคอ (กรณีสูญหาย)", item: "lanyard", priceKey: "lanyard", price: 50 },
   { label: "กรอบบัตร (กรณีสูญหาย)", item: "cardholder", priceKey: "cardholder_lost", price: 50 },
-  { label: "เปลี่ยนกรอบบัตร (กรณีชำรุด)", item: "cardholder", priceKey: "cardholder_damaged", price: 0 },
+  { label: "เปลี่ยนกรอบบัตร (กรณีชำรุด)", item: "cardholder", priceKey: "cardholder_damaged", price: 0, photo: true },
   { label: "ออกบัตรใหม่", item: "idcard", priceKey: "idcard", price: 200 },
 ]
 const DEFAULT_PRICES: Record<string, number> = Object.fromEntries(REQUEST_TYPES.filter((t) => t.priceKey).map((t) => [t.priceKey!, t.price!]))
@@ -464,89 +466,165 @@ app.post("/api/stock-check", async (c) => {
   return c.json({ ok: !short.length, short, message: short.length ? SHORT_MSG : "" })
 })
 
-// Body: JSON, or multipart with "data" (JSON) + "slip" (payment proof, purchases only).
-app.post("/api/requests", async (c) => {
-  const me = requireUser(c)!
-  let b: any = {}, slip: File | null = null
+// Request body: JSON, or multipart with "data" (JSON) + optional "slip" (payment proof) + "photo"
+// (damaged item). The same validation serves employees creating a request and HR creating one for an
+// employee or editing a pending one (HR: no payment slip / stock pre-check needed — approval still checks stock).
+type FileIn = { name: string; size: number; bytes: Uint8Array; mime: string }
+async function readFile(f: any, label: string): Promise<FileIn | string | null> {
+  if (!(f instanceof File) || !f.size) return null
+  if (f.size > MAX_SLIP_BYTES) return `ไฟล์${label}ใหญ่เกิน 6 MB`
+  const bytes = new Uint8Array(await f.arrayBuffer()), mime = sniffSlip(bytes)
+  if (!mime) return `${label}ต้องเป็นไฟล์รูปภาพ (JPG, PNG, WEBP, HEIC) หรือ PDF`
+  return { name: str(f.name, 120) || label, size: f.size, bytes, mime }
+}
+async function readRequestBody(c: any): Promise<{ b: any; slip: FileIn | null; photo: FileIn | null } | string> {
+  let b: any = {}, slip: any = null, photo: any = null
   if ((c.req.header("content-type") ?? "").includes("multipart/form-data")) {
     const form = await c.req.parseBody().catch(() => ({} as any))
-    try { b = JSON.parse(String(form.data ?? "{}")) } catch { return bad(c, "ข้อมูลไม่ถูกต้อง") }
-    if (form.slip instanceof File && form.slip.size > 0) slip = form.slip
+    try { b = JSON.parse(String(form.data ?? "{}")) } catch { return "ข้อมูลไม่ถูกต้อง" }
+    slip = await readFile(form.slip, "หลักฐานการชำระเงิน"); photo = await readFile(form.photo, "รูปชำรุด")
+    if (typeof slip === "string") return slip
+    if (typeof photo === "string") return photo
   } else b = await c.req.json().catch(() => ({}))
+  return { b, slip, photo }
+}
+type Checked = { f: any; type: RequestType; total: number; amount: number; vs: any[]; want: Map<number, number> }
+async function checkRequest(b: any, hr: boolean, files: { slip: boolean; photo: boolean }): Promise<Checked | { error: string; status?: number; short?: any }> {
   const settings = await getSettings()
+  const E = (error: string) => ({ error })
   const f = {
     req_date: /^\d{4}-\d{2}-\d{2}$/.test(String(b.req_date)) ? String(b.req_date) : bkkToday(),
     name: str(b.name, 100), emp_code: str(b.emp_code, 40), position: str(b.position, 100), dept: str(b.dept, 100),
     phone: str(b.phone, 30), email: str(b.email, 120).toLowerCase(), branch: str(b.branch, 100), type: str(b.type, 60), note: str(b.note, 500),
   }
-  if (!f.name || !f.emp_code || !f.position || !f.branch) return bad(c, "กรุณากรอกข้อมูลที่บังคับให้ครบ")
-  if (!EMAIL_RE.test(f.email)) return bad(c, "กรุณากรอกอีเมลให้ถูกต้อง (ใช้แจ้งเมื่อจัดส่งแล้ว)")
-  if (settings.branches.length && !settings.branches.includes(f.branch)) return bad(c, "กรุณาเลือกสาขาจากรายการ")
-  if (settings.positions.length && !settings.positions.includes(f.position)) return bad(c, "กรุณาเลือกตำแหน่งจากรายการ")
-  if (settings.depts.length && f.dept && !settings.depts.includes(f.dept)) return bad(c, "กรุณาเลือกแผนกจากรายการ")
-  if (settings.depts.length && !f.dept) return bad(c, "กรุณาเลือกแผนก")
+  if (!f.name || !f.emp_code || !f.position || !f.branch) return E("กรุณากรอกข้อมูลที่บังคับให้ครบ")
+  if (!EMAIL_RE.test(f.email)) return E("กรุณากรอกอีเมลให้ถูกต้อง (ใช้แจ้งเมื่อจัดส่งแล้ว)")
+  if (settings.branches.length && !settings.branches.includes(f.branch)) return E("กรุณาเลือกสาขาจากรายการ")
+  if (settings.positions.length && !settings.positions.includes(f.position)) return E("กรุณาเลือกตำแหน่งจากรายการ")
+  if (settings.depts.length && f.dept && !settings.depts.includes(f.dept)) return E("กรุณาเลือกแผนกจากรายการ")
+  if (settings.depts.length && !f.dept) return E("กรุณาเลือกแผนก")
   const type = typesFor(settings).find((t) => t.label === f.type)
-  if (!type) return bad(c, "กรุณาเลือกประเภทการเบิก")
+  if (!type) return E("กรุณาเลือกประเภทการเบิก")
   const linked = linkedProductIds(settings)
-  const itemProduct = type.item === "shirt" ? null : settings.itemProducts[type.item] ?? null
+  // Stock products this type may draw from: shirts = unlinked products; an item = its linked product;
+  // a bundle = the linked products of its items (each must appear once per set).
+  const parts = type.bundle ? type.bundle.map((it) => settings.itemProducts[it] ?? null).filter((x): x is number => Number.isInteger(x)) : []
+  const itemProduct = type.item === "shirt" || type.bundle ? null : settings.itemProducts[type.item] ?? null
   const rawLines = Array.isArray(b.lines) ? b.lines : []
   const want = new Map<number, number>()
   for (const l of rawLines) {
     const vid = int(l?.variant_id), qty = int(l?.qty)
-    if (!Number.isInteger(vid) || !Number.isInteger(qty) || qty <= 0 || qty > 999) return bad(c, "จำนวนต้องเป็นจำนวนเต็ม 1–999")
+    if (!Number.isInteger(vid) || !Number.isInteger(qty) || qty <= 0 || qty > 999) return E("จำนวนต้องเป็นจำนวนเต็ม 1–999")
     want.set(vid, (want.get(vid) ?? 0) + qty)
   }
   // Service item (no linked stock product): just a quantity, no lines.
-  const service = type.item !== "shirt" && !itemProduct
-  if (service) {
+  const service = type.item !== "shirt" && !type.bundle && !itemProduct
+  if (type.bundle) {
+    const q = int(b.qty)
+    if (!Number.isInteger(q) || q < 1 || q > 99) return E("จำนวนชุดต้องเป็นจำนวนเต็ม 1–99")
+  } else if (service) {
     want.clear()
     const q = int(b.qty)
-    if (!Number.isInteger(q) || q < 1 || q > 99) return bad(c, "จำนวนต้องเป็นจำนวนเต็ม 1–99")
+    if (!Number.isInteger(q) || q < 1 || q > 99) return E("จำนวนต้องเป็นจำนวนเต็ม 1–99")
   } else {
-    if (!want.size) return bad(c, type.item === "shirt" ? "กรุณาเลือกไซส์และจำนวนเสื้ออย่างน้อย 1 รายการ" : "กรุณาระบุจำนวน")
-    if (want.size > 30) return bad(c, "ได้สูงสุด 30 รายการต่อคำขอ")
+    if (!want.size) return E(type.item === "shirt" ? "กรุณาเลือกไซส์และจำนวนเสื้ออย่างน้อย 1 รายการ" : "กรุณาระบุจำนวน")
+    if (want.size > 30) return E("ได้สูงสุด 30 รายการต่อคำขอ")
   }
-  const total = service ? int(b.qty) : [...want.values()].reduce((a, n) => a + n, 0)
-  if (type.qty && total !== type.qty) return bad(c, `ประเภท "${type.label}" เบิกได้ ${type.qty} ตัว (ตอนนี้เลือก ${total} ตัว)`)
+  const total = service || type.bundle ? int(b.qty) : [...want.values()].reduce((a, n) => a + n, 0)
+  if (type.qty && total !== type.qty) return E(`ประเภท "${type.label}" เบิกได้ ${type.qty} ตัว (ตอนนี้เลือก ${total} ตัว)`)
   const amount = type.item === "shirt" ? (type.purchase ? priceFor(total, settings) : 0) : total * (type.price ?? 0)
-  if (amount > 0) {
-    if (b.ack_hr !== true) return bad(c, "กรุณายืนยันว่าสอบถาม HR เรื่องจำนวนคงเหลือแล้ว")
-    if (!slip) return bad(c, "กรุณาแนบหลักฐานการชำระเงิน")
-    if (slip.size > MAX_SLIP_BYTES) return bad(c, "ไฟล์หลักฐานการชำระเงินใหญ่เกิน 6 MB")
-    if (!SLIP_TYPES.includes(slip.type)) return bad(c, "หลักฐานการชำระเงินต้องเป็นรูปภาพ หรือ PDF")
-    if (int(b.amount) !== amount) return bad(c, `ยอดชำระไม่ตรงกับระบบ (${amount.toLocaleString()} บาท) กรุณารีเฟรชแล้วลองใหม่`)
+  if (amount > 0 && !hr) {   // HR records cash / later payment — slip optional
+    if (b.ack_hr !== true) return E("กรุณายืนยันว่าสอบถาม HR เรื่องจำนวนคงเหลือแล้ว")
+    if (!files.slip) return E("กรุณาแนบหลักฐานการชำระเงิน")
+    if (int(b.amount) !== amount) return E(`ยอดชำระไม่ตรงกับระบบ (${amount.toLocaleString()} บาท) กรุณารีเฟรชแล้วลองใหม่`)
   }
+  if (type.photo && !hr && !files.photo) return E("กรุณาถ่ายรูปของที่ชำรุดแนบมาด้วย")
   const vs = want.size ? await sql`
     SELECT v.id, v.sku, v.size, v.color, p.id AS product_id, p.name, p.category, p.unit
     FROM uni_variants v JOIN uni_products p ON p.id = v.product_id
     WHERE v.id IN ${sql([...want.keys()])} AND v.deleted_at IS NULL AND p.deleted_at IS NULL` : []
-  if (vs.length !== want.size) return bad(c, "มีรายการที่ไม่พบในระบบ กรุณาเลือกใหม่")
+  if (vs.length !== want.size) return E("มีรายการที่ไม่พบในระบบ กรุณาเลือกใหม่")
   // Lines must come from the right product: the linked one for an item, an unlinked one for shirts.
   for (const v of vs as any[]) {
-    if (itemProduct ? v.product_id !== itemProduct : linked.includes(v.product_id)) return bad(c, "รายการที่เลือกไม่ตรงกับประเภทการเบิก กรุณาเลือกใหม่")
+    const ok = type.bundle ? parts.includes(v.product_id) : itemProduct ? v.product_id === itemProduct : !linked.includes(v.product_id)
+    if (!ok) return E("รายการที่เลือกไม่ตรงกับประเภทการเบิก กรุณาเลือกใหม่")
   }
-  // Not enough stock → stop here (before saving any payment slip).
-  const short = await shortLines(want)
-  if (short.length) return c.json({ error: `${SHORT_MSG} (${short.map((x) => x.label).join(", ")})`, short }, 409)
-  const slipBytes = slip ? new Uint8Array(await slip.arrayBuffer()) : null
-  const slipMime = slipBytes ? sniffSlip(slipBytes) : null
-  if (slipBytes && !slipMime) return bad(c, "หลักฐานการชำระเงินต้องเป็นไฟล์รูปภาพ (JPG, PNG, WEBP, HEIC) หรือ PDF")
-  const no = await sql.begin(async (tx) => {
-    let slipId: number | null = null
-    if (slip && slipBytes) {
-      const [fr] = await tx`INSERT INTO uni_files (name, mime, size, data, uploaded_by) VALUES (${str(slip.name, 120) || "slip"}, ${slipMime}, ${slip.size}, ${slipBytes}, ${me.id}) RETURNING id`
-      slipId = fr.id
+  if (type.bundle) {   // one line per linked part, quantity = number of sets
+    for (const pid of parts) {
+      const ls = (vs as any[]).filter((v) => v.product_id === pid)
+      if (ls.length !== 1 || want.get(ls[0].id) !== total) return E("ชุดบัตรต้องมีสายคล้องคอและกรอบบัตรอย่างละ 1 ต่อชุด กรุณาเลือกใหม่")
     }
+  }
+  // Not enough stock → stop here (before saving any file). HR may record it anyway; approval re-checks.
+  if (!hr) {
+    const short = await shortLines(want)
+    if (short.length) return { error: `${SHORT_MSG} (${short.map((x) => x.label).join(", ")})`, status: 409, short }
+  }
+  return { f, type, total, amount, vs: vs as any[], want }
+}
+
+app.post("/api/requests", async (c) => {
+  const me = requireUser(c)!
+  const hr = me.role === "hr"
+  const rb = await readRequestBody(c); if (typeof rb === "string") return bad(c, rb)
+  const ck = await checkRequest(rb.b, hr, { slip: !!rb.slip, photo: !!rb.photo })
+  if ("error" in ck) return c.json({ error: ck.error, short: ck.short }, (ck.status ?? 400) as any)
+  const { f, total, amount, vs, want } = ck
+
+  const no = await sql.begin(async (tx) => {
+    const slipId = rb.slip ? await saveFile(tx, rb.slip, me.id) : null
+    const photoId = rb.photo ? await saveFile(tx, rb.photo, me.id) : null
     const no = await nextNo(tx, `REQ-${thaiDateStamp()}`)
-    const [r] = await tx`INSERT INTO uni_requests (no, req_date, name, emp_code, position, dept, branch, phone, email, type, kind, total_qty, amount, slip_file_id, note, requester_id)
-      VALUES (${no}, ${f.req_date}, ${f.name}, ${f.emp_code}, ${f.position}, ${f.dept}, ${f.branch}, ${f.phone}, ${f.email}, ${f.type}, ${amount > 0 ? "purchase" : "issue"}, ${total}, ${amount}, ${slipId}, ${f.note}, ${me.id}) RETURNING id`
-    for (const v of vs) await tx`INSERT INTO uni_request_lines (request_id, product_id, variant_id, product_name, category, unit, sku, size, color, qty)
-      VALUES (${r.id}, ${v.product_id}, ${v.id}, ${v.name}, ${v.category}, ${v.unit}, ${v.sku}, ${v.size}, ${v.color}, ${want.get(v.id)!})`
-    // Remember the requester's details for the next form.
-    await tx`UPDATE uni_users SET phone = ${f.phone}, email = ${f.email}, position = ${f.position}, dept = ${f.dept}, branch = ${f.branch} WHERE id = ${me.id}`
+    const [r] = await tx`INSERT INTO uni_requests (no, req_date, name, emp_code, position, dept, branch, phone, email, type, kind, total_qty, amount, slip_file_id, photo_file_id, by_hr, note, requester_id)
+      VALUES (${no}, ${f.req_date}, ${f.name}, ${f.emp_code}, ${f.position}, ${f.dept}, ${f.branch}, ${f.phone}, ${f.email}, ${f.type}, ${amount > 0 ? "purchase" : "issue"}, ${total}, ${amount}, ${slipId}, ${photoId}, ${hr}, ${f.note}, ${me.id}) RETURNING id`
+    await insertLines(tx, r.id, vs, want)
+    // Remember the requester's details for the next form (not when HR files it for someone else).
+    if (!hr) await tx`UPDATE uni_users SET phone = ${f.phone}, email = ${f.email}, position = ${f.position}, dept = ${f.dept}, branch = ${f.branch} WHERE id = ${me.id}`
     return no
   })
   return c.json({ no, amount })
+})
+async function saveFile(tx: any, f: FileIn, by: number): Promise<number> {
+  const [fr] = await tx`INSERT INTO uni_files (name, mime, size, data, uploaded_by) VALUES (${f.name}, ${f.mime}, ${f.size}, ${f.bytes}, ${by}) RETURNING id`
+  return fr.id
+}
+async function insertLines(tx: any, requestId: number, vs: any[], want: Map<number, number>) {
+  for (const v of vs) await tx`INSERT INTO uni_request_lines (request_id, product_id, variant_id, product_name, category, unit, sku, size, color, qty)
+    VALUES (${requestId}, ${v.product_id}, ${v.id}, ${v.name}, ${v.category}, ${v.unit}, ${v.sku}, ${v.size}, ${v.color}, ${want.get(v.id)!})`
+}
+
+// One request (HR, or the employee who filed it) — used to prefill the HR edit form.
+app.get("/api/requests/:no", async (c) => {
+  const me = requireUser(c)!
+  const [r] = await sql`SELECT * FROM uni_requests WHERE no = ${c.req.param("no")}`
+  if (!r || (me.role !== "hr" && r.requester_id !== me.id)) return bad(c, "ไม่พบคำขอ", 404)
+  const lines = await sql`SELECT * FROM uni_request_lines WHERE request_id = ${r.id} ORDER BY id`
+  return c.json({ ...r, lines })
+})
+// HR edits a pending request: same checks as creating; lines replaced; stock is cut only at approval.
+app.put("/api/requests/:no", hrOnly, async (c) => {
+  const me = requireUser(c)!
+  const [cur] = await sql`SELECT * FROM uni_requests WHERE no = ${c.req.param("no")}`
+  if (!cur) return bad(c, "ไม่พบคำขอ", 404)
+  if (cur.status !== "pending") return bad(c, "แก้ไขได้เฉพาะคำขอที่รออนุมัติ")
+  const rb = await readRequestBody(c); if (typeof rb === "string") return bad(c, rb)
+  const ck = await checkRequest(rb.b, true, { slip: !!rb.slip || !!cur.slip_file_id, photo: !!rb.photo || !!cur.photo_file_id })
+  if ("error" in ck) return c.json({ error: ck.error }, (ck.status ?? 400) as any)
+  const { f, total, amount, vs, want } = ck
+  const ok = await sql.begin(async (tx) => {
+    const [lock] = await tx`SELECT id, status FROM uni_requests WHERE id = ${cur.id} FOR UPDATE`
+    if (lock.status !== "pending") return false
+    const slipId = rb.slip ? await saveFile(tx, rb.slip, me.id) : cur.slip_file_id
+    const photoId = rb.photo ? await saveFile(tx, rb.photo, me.id) : cur.photo_file_id
+    await tx`UPDATE uni_requests SET req_date = ${f.req_date}, name = ${f.name}, emp_code = ${f.emp_code}, position = ${f.position}, dept = ${f.dept}, branch = ${f.branch},
+      phone = ${f.phone}, email = ${f.email}, type = ${f.type}, kind = ${amount > 0 ? "purchase" : "issue"}, total_qty = ${total}, amount = ${amount},
+      slip_file_id = ${slipId}, photo_file_id = ${photoId}, note = ${f.note}, edited_at = NOW(), edited_by = ${me.name} WHERE id = ${cur.id}`
+    await tx`DELETE FROM uni_request_lines WHERE request_id = ${cur.id}`
+    await insertLines(tx, cur.id, vs, want)
+    return true
+  })
+  if (!ok) return bad(c, "คำขอนี้ไม่ได้อยู่ในสถานะรออนุมัติแล้ว")
+  return c.json({ ok: true, amount })
 })
 
 app.get("/api/requests", async (c) => {
@@ -687,7 +765,7 @@ async function notifyShipped(r: any): Promise<{ sent: boolean; error: string }> 
 app.get("/api/files/:id", async (c) => {
   const me = requireUser(c)!
   const id = int(c.req.param("id"))
-  const [r] = await sql`SELECT requester_id FROM uni_requests WHERE slip_file_id = ${id}`
+  const [r] = await sql`SELECT requester_id FROM uni_requests WHERE slip_file_id = ${id} OR photo_file_id = ${id} LIMIT 1`
   if (!r || (me.role !== "hr" && r.requester_id !== me.id)) return bad(c, "ไม่พบไฟล์", 404)
   const [f] = await sql`SELECT name, mime, data FROM uni_files WHERE id = ${id}`
   if (!f || !SLIP_TYPES.includes(f.mime)) return bad(c, "ไม่พบไฟล์", 404)
