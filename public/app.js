@@ -176,7 +176,7 @@
       }).join("") + "</tbody></table></div></div>" +
       '<div class="card"><h3 style="margin-top:0">ความเคลื่อนไหว</h3>' + (d.moves.length ? '<div class="scroll"><table class="t"><thead><tr><th>วันที่</th><th>ประเภท</th><th>SKU</th><th class="n">จำนวน</th><th class="n">คงเหลือหลังรายการ</th><th>อ้างอิง</th><th>โดย</th></tr></thead><tbody>' +
       d.moves.map(function (m) {
-        var t = MOVE[m.type] || [m.type, ""];
+        var t = m.type === "out" && m.qty > 0 ? ["คืนสต๊อก (ลบคำขอ)", "in"] : MOVE[m.type] || [m.type, ""];
         var ref = m.type === "out" ? esc(m.ref) + "<br><span class=\"muted small\">" + esc(m.who) + (m.branch ? " · " + esc(m.branch) : "") + "</span>" : esc(m.ref) + (m.note ? '<br><span class="muted small">' + esc(m.note) + "</span>" : "");
         return '<tr><td class="nowrap">' + thDateTime(m.at) + '</td><td><span class="badge ' + t[1] + '">' + t[0] + "</span></td><td>" + esc(m.sku) + '<br><span class="muted small">' + esc([m.size, m.color].filter(Boolean).join(" / ")) + '</span></td><td class="n ' + (m.qty > 0 ? "pos" : "neg") + '">' + (m.qty > 0 ? "+" : "−") + Math.abs(m.qty) + '</td><td class="n">' + m.balance + "</td><td>" + ref + "</td><td class=\"small\">" + (m.type === "out" ? "" : esc(m.who)) + "</td></tr>";
       }).join("") + "</tbody></table></div>" : '<div class="empty">ยังไม่มีความเคลื่อนไหว</div>') + pager(page, d.hasMore) + "</div>");
@@ -593,6 +593,11 @@
         if (act === "approve") return approveDialog(r);
         if (act === "reject") return rejectDialog(r);
         if (act === "dn") return window.open("/dn/" + encodeURIComponent(r.dn_no), "_blank");
+        if (act === "delete") {
+          var cut = r.status === "approved" || r.status === "shipped";
+          if (!confirm("ลบคำขอ " + r.no + " ออกถาวร?\n" + (cut ? "คำขอนี้ตัดสต๊อกไปแล้ว — ระบบจะคืนจำนวนกลับเข้าสต๊อก\n" : "") + "ลบแล้วกู้คืนไม่ได้")) return;
+          return api("/api/requests/" + encodeURIComponent(r.no), { method: "DELETE" }).then(function (res) { toast("ลบคำขอ " + r.no + " แล้ว" + (res.restocked ? " · คืนสต๊อกแล้ว" : "")); route(); }).catch(function (e) { alert(e.message); });
+        }
         if (act === "cancel") { if (!confirm("ยกเลิกคำขอ " + r.no + "?")) return; return doAct("/api/requests/" + encodeURIComponent(r.no) + "/cancel", "ยกเลิกคำขอแล้ว"); }
         if (act === "ship") return shipDialog(r, false);
         if (act === "shipdate") return shipDialog(r, true);
@@ -626,6 +631,7 @@
     var acts = [];
     if (pend && hr) { acts.push('<button class="btn sm" data-act="approve" data-no="' + esc(r.no) + '">อนุมัติและออกใบส่งสินค้า</button>'); acts.push('<button class="btn sm ghost" data-act="edit" data-no="' + esc(r.no) + '">แก้ไข</button>'); acts.push('<button class="btn sm danger" data-act="reject" data-no="' + esc(r.no) + '">ไม่อนุมัติ</button>'); }
     if (pend && r.mine) acts.push('<button class="btn sm ghost" data-act="cancel" data-no="' + esc(r.no) + '">ยกเลิกคำขอ</button>');
+    if (hr) acts.push('<button class="btn sm danger" data-act="delete" data-no="' + esc(r.no) + '">ลบคำขอ</button>');
     if (r.status === "approved" || r.status === "shipped") acts.push('<button class="btn sm ghost" data-act="dn" data-no="' + esc(r.no) + '">ดูใบส่งสินค้า</button>');
     if (r.status === "approved" && hr) acts.push('<button class="btn sm" data-act="ship" data-no="' + esc(r.no) + '">อัปเดตเป็น "จัดส่งแล้ว"</button>');
     if (r.status === "shipped" && hr) acts.push('<button class="btn sm ghost" data-act="shipdate" data-no="' + esc(r.no) + '">แก้วันที่จัดส่ง</button>');

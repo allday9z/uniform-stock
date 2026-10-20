@@ -739,6 +739,38 @@ app.post("/api/requests/:no/cancel", async (c) => {
   return c.json({ ok: true })
 })
 
+// Delete a request for good — HR only (htask-1792472180605). Stock already cut (approved / shipped)
+// goes back with a reversing "out" move (+qty, ref "ลบคำขอ …"): the balance trail stays complete and
+// the issued totals drop again. Its lines, payment slip and photo are removed with it.
+async function deleteRequest(tx: any, r: any, who: { id: number | null; name: string }) {
+  if (r.status === "approved" || r.status === "shipped") {
+    const lines = await tx`SELECT * FROM uni_request_lines WHERE request_id = ${r.id} ORDER BY variant_id`
+    for (const l of lines) {
+      const [v] = await tx`UPDATE uni_variants SET qty = qty + ${l.qty} WHERE id = ${l.variant_id} RETURNING qty`
+      if (!v) continue
+      await tx`INSERT INTO uni_moves (product_id, variant_id, product_name, sku, size, color, type, qty, balance, ref, who, branch, note, by_user)
+        VALUES (${l.product_id}, ${l.variant_id}, ${l.product_name}, ${l.sku}, ${l.size}, ${l.color}, 'out', ${l.qty}, ${v.qty}, ${"ลบคำขอ " + r.no},
+                ${who.name}, ${r.branch}, ${`คืนสต๊อกจากการลบคำขอ ${r.no}${r.dn_no ? " / " + r.dn_no : ""}`}, ${who.id})`
+    }
+  }
+  const files = [r.slip_file_id, r.photo_file_id].filter((x) => Number.isInteger(x))
+  await tx`DELETE FROM uni_request_lines WHERE request_id = ${r.id}`
+  await tx`DELETE FROM uni_requests WHERE id = ${r.id}`
+  if (files.length) await tx`DELETE FROM uni_files WHERE id IN ${tx(files)}`
+}
+app.delete("/api/requests/:no", hrOnly, async (c) => {
+  const me = requireUser(c)!
+  const res = await sql.begin(async (tx) => {
+    const [r] = await tx`SELECT * FROM uni_requests WHERE no = ${c.req.param("no")} FOR UPDATE`
+    if (!r) return null
+    await deleteRequest(tx, r, { id: me.id, name: me.name })
+    return { no: r.no, restocked: r.status === "approved" || r.status === "shipped" }
+  })
+  if (!res) return bad(c, "ไม่พบคำขอ", 404)
+  console.log("[delete] request", res.no, "by", me.name, res.restocked ? "(stock returned)" : "")
+  return c.json({ ok: true, ...res })
+})
+
 app.post("/api/requests/:no/reject", hrOnly, async (c) => {
   const me = requireUser(c)!
   const b = await c.req.json().catch(() => ({}))
@@ -1017,6 +1049,27 @@ app.get("/dn/:no", async (c) => {
 })
 
 // ---------- static SPA ----------
+// One-off (htask-1792472180605, 20 Oct 2026): HR asked to remove every request made while testing the
+// system. Runs once — a marker row in uni_settings — on the requests that exist at that moment. The rows
+// are copied to *_bak_20261020 tables first (lines, files and the stock moves of those requests too).
+async function purgeTestRequests() {
+  const KEY = "purge-test-requests-2026-10-20"
+  const [done] = await sql`SELECT 1 FROM uni_settings WHERE key = ${KEY}`
+  if (done) return
+  const summary = await sql.begin(async (tx) => {
+    await tx`CREATE TABLE IF NOT EXISTS uni_requests_bak_20261020 AS SELECT * FROM uni_requests`
+    await tx`CREATE TABLE IF NOT EXISTS uni_request_lines_bak_20261020 AS SELECT * FROM uni_request_lines`
+    await tx`CREATE TABLE IF NOT EXISTS uni_files_bak_20261020 AS SELECT * FROM uni_files`
+    await tx`CREATE TABLE IF NOT EXISTS uni_moves_bak_20261020 AS SELECT * FROM uni_moves`
+    const rows = await tx`SELECT * FROM uni_requests ORDER BY id FOR UPDATE`
+    for (const r of rows) await deleteRequest(tx, r, { id: null, name: "ระบบ (ล้างข้อมูลทดสอบ)" })
+    const s = { at: new Date().toISOString(), deleted: rows.length, restocked: rows.filter((r: any) => r.status === "approved" || r.status === "shipped").map((r: any) => r.no), nos: rows.map((r: any) => r.no) }
+    await tx`INSERT INTO uni_settings (key, value) VALUES (${KEY}, ${tx.json(s)})`
+    return s
+  })
+  console.log("[purge] test requests deleted:", summary.deleted, "| stock returned for:", summary.restocked.join(", ") || "-", "| all:", summary.nos.join(", ") || "-")
+}
+
 app.get("/health", (c) => c.json({ ok: true }))
 app.get("/app.js", () => new Response(Bun.file(import.meta.dir + "/../public/app.js"), { headers: { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-cache" } }))
 app.get("/style.css", () => new Response(Bun.file(import.meta.dir + "/../public/style.css"), { headers: { "Content-Type": "text/css; charset=utf-8", "Cache-Control": "no-cache" } }))
@@ -1025,5 +1078,6 @@ app.notFound((c) => (c.req.path.startsWith("/api/") ? bad(c, "not found", 404) :
 app.onError((err, c) => { console.error("[error]", err); return c.json({ error: "เกิดข้อผิดพลาดในระบบ กรุณาลองใหม่" }, 500) })
 
 await initDB()
+await purgeTestRequests()
 console.log(`[uniform-stock] listening on :${PORT}${HR_SETUP_CODE ? "" : " (HR_SETUP_CODE not set — first HR account can't be created)"}`)
 export default { port: PORT, fetch: app.fetch }
