@@ -30,9 +30,10 @@ const HR_SETUP_CODE = process.env.HR_SETUP_CODE ?? ""
 //    (or products + extras) = a set with one of each per set; extras = parts listed on the request
 //    but not cut from stock (e.g. the ID card itself); no products at all = a service (no stock).
 //  price = baht per piece / set (0 = free); photo = a photo of the damaged item is required;
-//  active = offered in the form (old requests keep the type label as text).
-type RequestType = { id: string; label: string; kind: "shirt" | "item"; qty: number | null; purchase: boolean; price: number; products: number[]; extras: string[]; photo: boolean; active: boolean }
-const isBundle = (t: RequestType) => t.kind === "item" && t.products.length + t.extras.length > 1
+//  active = offered in the form (old requests keep the type label as text);
+//  fixed = a ready-made kit: one set = one of every SKU of its products, cut automatically (no per-item entry).
+type RequestType = { id: string; label: string; kind: "shirt" | "item"; qty: number | null; purchase: boolean; price: number; products: number[]; extras: string[]; photo: boolean; active: boolean; fixed: boolean }
+const isBundle = (t: RequestType) => t.kind === "item" && (t.fixed || t.products.length + t.extras.length > 1)
 // The built-in list (Oct 2026 HR spec) — becomes the editable list the first time settings load.
 // Old settings linked stock products per item (itemProducts) and kept prices by key (prices).
 function legacyTypes(v: any): RequestType[] {
@@ -40,7 +41,7 @@ function legacyTypes(v: any): RequestType[] {
   const price = (k: string, d: number) => (Number.isInteger(v.prices?.[k]) ? v.prices[k] : d)
   const names: Record<string, string> = { lanyard: "สายคล้องคอ", cardholder: "กรอบบัตร", idcard: "บัตรพนักงาน" }
   const set = ["lanyard", "cardholder", "idcard"]
-  const base = { qty: null, purchase: false, price: 0, products: [] as number[], extras: [] as string[], photo: false, active: true }
+  const base = { qty: null, purchase: false, price: 0, products: [] as number[], extras: [] as string[], photo: false, active: true, fixed: false }
   const shirt = (id: string, label: string, qty: number | null) => ({ ...base, id, label, kind: "shirt" as const, qty, purchase: qty === null })
   const item = (id: string, label: string, p: number, products: number[], extra: Partial<RequestType> = {}) => ({ ...base, id, label, kind: "item" as const, price: p, products, ...extra })
   return [
@@ -69,7 +70,9 @@ function cleanType(t: any, live: Set<number> | null): RequestType | string {
   const extras = kind === "item" ? (Array.isArray(t?.extras) ? t.extras : String(t?.extras ?? "").split(",")).map((x: any) => str(x, 60)).filter(Boolean).slice(0, 10) : []
   if (products.length > 10) return `"${label}": เลือกสินค้าได้สูงสุด 10 รายการ`
   const id = /^[\w-]{1,40}$/.test(String(t?.id ?? "")) ? String(t.id) : "t" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
-  return { id, label, kind, qty, purchase, price, products, extras, photo: t?.photo === true, active: t?.active !== false }
+  // fixed: explicit from the settings form; types saved before it existed — on for "Welcome Kit" (HR, Oct 2026).
+  const fixed = kind === "item" && products.length > 0 && (typeof t?.fixed === "boolean" ? t.fixed : /welcome\s*kit/i.test(label))
+  return { id, label, kind, qty, purchase, price, products, extras, photo: t?.photo === true, active: t?.active !== false, fixed }
 }
 const MAX_SLIP_BYTES = 6 * 1024 * 1024
 const SLIP_TYPES = ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "application/pdf"]
@@ -533,8 +536,10 @@ function checkItem(raw: any, settings: Settings, hr: boolean): CheckedItem | str
     if (service) want.clear()
     const q = int(raw.qty)
     if (!Number.isInteger(q) || q < 1 || q > 99) return bundle ? "จำนวนชุดต้องเป็นจำนวนเต็ม 1–99" : "จำนวนต้องเป็นจำนวนเต็ม 1–99"
-    // A set: the employee / HR types the quantity of each item actually issued (stock is cut by these).
-    if (bundle && !service && !want.size) return "กรุณากรอกจำนวนของแต่ละรายการในชุด"
+    // A kit: lines are built from its SKUs (checkRequest). Another set: the quantity of each item
+    // actually issued is typed in the form (stock is cut by these).
+    if (type.fixed) want.clear()
+    else if (bundle && !service && !want.size) return "กรุณากรอกจำนวนของแต่ละรายการในชุด"
     if (want.size > 30) return "ได้สูงสุด 30 รายการต่อประเภท"
   } else {
     if (!want.size) return type.kind === "shirt" ? "กรุณาเลือกไซส์และจำนวนเสื้ออย่างน้อย 1 รายการ" : "กรุณาระบุจำนวน"
@@ -554,7 +559,7 @@ async function checkRequest(b: any, hr: boolean, files: { slip: boolean; photo: 
     phone: str(b.phone, 30), email: str(b.email, 120).toLowerCase(), branch: str(b.branch, 100), type: "", note: str(b.note, 500),
   }
   if (!f.name || !f.emp_code || !f.position || !f.branch) return E("กรุณากรอกข้อมูลที่บังคับให้ครบ")
-  if (!EMAIL_RE.test(f.email)) return E("กรุณากรอกอีเมลให้ถูกต้อง (ใช้แจ้งเมื่อจัดส่งแล้ว)")
+  if (f.email && !EMAIL_RE.test(f.email)) return E("อีเมลไม่ถูกต้อง (ไม่บังคับกรอก — เว้นว่างได้)")   // optional since htask-1792470553621
   if (settings.branches.length && !settings.branches.includes(f.branch)) return E("กรุณาเลือกสาขาจากรายการ")
   if (settings.positions.length && !settings.positions.includes(f.position)) return E("กรุณาเลือกตำแหน่งจากรายการ")
   if (settings.depts.length && f.dept && !settings.depts.includes(f.dept)) return E("กรุณาเลือกแผนกจากรายการ")
@@ -577,6 +582,13 @@ async function checkRequest(b: any, hr: boolean, files: { slip: boolean; photo: 
     if (int(b.amount) !== amount) return E(`ยอดชำระไม่ตรงกับระบบ (${amount.toLocaleString()} บาท) กรุณารีเฟรชแล้วลองใหม่`)
   }
   if (items.some((x) => x.type.photo) && !hr && !files.photo) return E("กรุณาถ่ายรูปของที่ชำรุดแนบมาด้วย")
+  // A kit: one of every live SKU of its products per set, whatever the form sent.
+  for (const it of items) if (it.type.fixed) {
+    const kit = await sql`SELECT v.id FROM uni_variants v JOIN uni_products p ON p.id = v.product_id
+      WHERE v.product_id IN ${sql(it.type.products)} AND v.deleted_at IS NULL AND p.deleted_at IS NULL`
+    if (!kit.length) return E(`${it.type.label}: ยังไม่มีรายการสินค้าในชุด — กรุณาติดต่อ HR`)
+    for (const v of kit) it.want.set(v.id, it.total)
+  }
   const want = new Map<number, number>()   // all items together — for the stock check
   for (const it of items) for (const [vid, q] of it.want) want.set(vid, (want.get(vid) ?? 0) + q)
   const vs = want.size ? await sql`
@@ -804,7 +816,7 @@ app.post("/api/requests/:no/notify", hrOnly, async (c) => {
   return c.json({ ok: true, notify })
 })
 async function notifyShipped(r: any): Promise<{ sent: boolean; error: string }> {
-  if (!r.email) { await sql`UPDATE uni_requests SET notify_error = ${"ไม่มีอีเมลในคำขอ"} WHERE id = ${r.id}`; return { sent: false, error: "ไม่มีอีเมลในคำขอ" } }
+  if (!r.email) return { sent: false, error: "ไม่มีอีเมลในคำขอ" }   // email is optional — nothing to send, not a failure
   try {
     const lines = await sql`SELECT * FROM uni_request_lines WHERE request_id = ${r.id} ORDER BY id`
     const m = shippedEmail(r, displayRows(r, lines as any, await getSettings()) as any, thaiDate(r.shipped_date))
