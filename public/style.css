@@ -178,3 +178,11 @@ table.lines tr.grp td { background: #f1f6f6; font-weight: 600; font-size: 13px; 
 .pchips { display: flex; flex-wrap: wrap; gap: 6px; }
 .pchip { display: inline-flex; gap: 6px; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 5px 10px; font-size: 13.5px; background: #fff; cursor: pointer; }
 .pchip:has(input:checked) { border-color: var(--teal); background: var(--teal-l); }
+
+/* item types: one quantity box per SKU */
+.tparts .vrow { grid-template-columns: minmax(0, 1fr) 90px; }
+.tparts .vrow .xq { text-align: right; }
+.tparts .vhead { margin: 4px 0 8px; }
+.titem .tset { grid-template-columns: minmax(0, 1fr) 90px; }
+.titem .tset .tname { font-weight: 600; background: transparent; border-color: transparent; padding-left: 0; }
+@media (max-width: 820px) { .tparts .vrow, .titem .tset { grid-template-columns: minmax(0, 1fr) 90px; } }

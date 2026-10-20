@@ -292,9 +292,6 @@
     var allProducts = cat, shirts = cat.filter(function (p) { return linkedIds.indexOf(p.id) === -1; });
     var single = shirts.length === 1 ? shirts[0] : null;
     function productById(id) { return allProducts.find(function (p) { return p.id === id; }) || null; }
-    function itemProduct(t) { return t && t.kind === "item" && !t.bundle && t.products.length ? productById(t.products[0]) : null; }
-    // A bundle (e.g. lanyard + holder + card): its stock products, one of each per set, plus parts not cut from stock.
-    function bundleParts(t) { return t && t.bundle ? t.products.map(function (id) { var p = productById(id); return { p: p, name: p ? p.name : "" }; }).filter(function (x) { return x.p; }).concat(t.extras.map(function (n) { return { p: null, name: n }; })) : []; }
     function amountFor(t, n) { return !t ? 0 : t.item === "shirt" ? (t.purchase ? priceFor(n) : 0) : n * (t.price || 0); }
     function variantOptions(p, ph) { return '<option value="">-- ' + (ph || "เลือกแบบ") + ' --</option>' + p.variants.map(function (x) { return '<option value="' + x.id + '">' + esc(vlabel(x)) + "</option>"; }).join(""); }
     setView((edit ? '<h1>แก้ไขคำขอ ' + esc(edit.no) + '</h1><p class="sub">HR แก้ไขข้อมูล/รายการแทนพนักงาน — สต๊อกจะถูกตัดตามรายการที่แก้ไขเมื่อกดอนุมัติ</p>'
@@ -328,7 +325,7 @@
       var el = document.createElement("div"); el.className = "tblock";
       el.innerHTML = '<div class="thead"><span class="tno"></span>' + typeSelect() + '<button class="x tdel" title="ลบประเภทนี้">×</button></div><p class="small muted thint"></p>' +
         '<div class="tshirt" hidden><div class="tlines"></div><button class="btn sm ghost tadd">+ เพิ่มไซส์</button></div>' +
-        '<div class="titem" hidden><div class="tparts"></div><div class="lrow item"><div class="i prname tname"></div><select class="i tsku" hidden></select><input class="i tqty" type="number" min="1" max="99" step="1" value="1" aria-label="จำนวน"></div></div>' +
+        '<div class="titem" hidden><div class="lrow item tset"><div class="i prname tname"></div><input class="i tqty" type="number" min="1" max="99" step="1" value="1" aria-label="จำนวน"></div><div class="tparts"></div></div>' +
         '<div class="tsub"></div>';
       var blk = { el: el };
       var sel = $(".ttype", el), tlines = $(".tlines", el);
@@ -346,19 +343,26 @@
         $(".x", div).onclick = function () { div.remove(); if (!tlines.children.length) blk.addLine(); update(); };
         tlines.appendChild(div); return div;
       };
+      // Item types: every SKU of the type's stock products gets its own quantity box (no dropdown) —
+      // stock is cut by what is typed. A set also asks for the number of sets (price per set).
+      function vrows() { return $$(".tparts .vq", el); }
       blk.setType = function () {
         var t = blk.type(); $(".tshirt", el).hidden = !(t && t.item === "shirt"); $(".titem", el).hidden = !(t && t.item !== "shirt");
         if (t && t.item !== "shirt") {
-          var ip = itemProduct(t), sku = $(".tsku", el);
-          $(".tname", el).textContent = t.bundle ? "จำนวนชุด" : ip ? ip.name : t.label;
-          sku.hidden = !(ip && ip.variants.length > 1); sku.innerHTML = ip && ip.variants.length > 1 ? variantOptions(ip) : "";
-          // Bundle: what one set contains; parts with several SKUs get a picker.
-          $(".tparts", el).innerHTML = bundleParts(t).map(function (x) {
-            return '<div class="lrow item bpart"><div class="i prname">' + esc(x.name) + '</div>' + (x.p && x.p.variants.length > 1 ? '<select class="i" data-pid="' + x.p.id + '">' + variantOptions(x.p) + "</select>" : "") +
-              '<div class="small muted bpq">' + (x.p ? "1 / ชุด" : "1 / ชุด · ไม่ตัดสต๊อก") + "</div></div>";
-          }).join("");
-          $$(".tparts select", el).forEach(function (x) { x.onchange = update; });
+          var prods = t.products.map(productById).filter(Boolean), nrows = prods.reduce(function (a, p) { return a + p.variants.length; }, 0);
+          $(".tset", el).hidden = !(t.bundle || !prods.length);   // number of sets / service quantity
+          $(".tname", el).textContent = t.bundle ? "จำนวนชุด" : t.label;
           $(".tqty", el).value = 1;
+          $(".tparts", el).innerHTML = (prods.length ? '<p class="small muted vhead">กรอกจำนวนที่เบิกจริงของแต่ละรายการ — ระบบตัดสต๊อกตามจำนวนนี้</p>' : "") +
+            prods.map(function (p) {
+              return p.variants.map(function (v) {
+                // Unambiguous rows start filled: a single-SKU product in a set (1 per set), or the only row of a single item.
+                var def = t.bundle ? (p.variants.length === 1 ? 1 : 0) : nrows === 1 ? 1 : 0;
+                return '<div class="lrow vrow"><div class="i prname">' + esc(p.variants.length === 1 ? p.name : p.name + " · " + vlabel(v)) + '</div><input class="i vq" type="number" min="0" max="999" step="1" value="' + def + '" data-vid="' + v.id + '"' + (t.bundle && p.variants.length === 1 ? ' data-follow="1"' : "") + ' aria-label="จำนวน"></div>';
+              }).join("");
+            }).join("") +
+            (t.bundle ? t.extras.map(function (x) { return '<div class="lrow vrow"><div class="i prname">' + esc(x) + '</div><div class="small muted xq">ไม่ตัดสต๊อก</div></div>'; }).join("") : "");
+          vrows().forEach(function (q) { q.oninput = function () { delete q.dataset.follow; update(); }; });
         }
         if (t && t.item === "shirt") {
           if (!tlines.children.length) blk.addLine();
@@ -368,25 +372,18 @@
       };
       blk.collect = function () {
         var t = blk.type(); if (!t) return [];
-        if (t.bundle) return bundleParts(t).filter(function (x) { return x.p; }).map(function (x) {
-          var ps = $('.tparts select[data-pid="' + x.p.id + '"]', el);
-          return { variant_id: x.p.variants.length === 1 ? x.p.variants[0].id : ps ? ps.value : "", qty: $(".tqty", el).value };
-        }).filter(function (l) { return l.variant_id; });
-        if (t.item !== "shirt") {
-          var p = itemProduct(t); if (!p) return [];   // service: quantity only
-          var vid = p.variants.length === 1 ? p.variants[0].id : $(".tsku", el).value;
-          return vid ? [{ variant_id: vid, qty: $(".tqty", el).value }] : [];
-        }
+        if (t.item !== "shirt") return vrows().map(function (q) { return { variant_id: q.dataset.vid, qty: q.value }; }).filter(function (l) { return Number(l.qty) > 0; });
         return $$(".lrow", tlines).map(function (r) { return { variant_id: $(".va", r).value, qty: $(".qt", r).value }; }).filter(function (l) { return l.variant_id; });
       };
-      blk.qty = function () { var t = blk.type(); return !t ? 0 : t.item !== "shirt" ? Number($(".tqty", el).value) || 0 : blk.collect().reduce(function (a, l) { return a + (Number(l.qty) || 0); }, 0); };
+      function pieces() { return blk.collect().reduce(function (a, l) { return a + (Number(l.qty) || 0); }, 0); }
+      // Shirts: pieces; a set / service: the number typed in the set box; a single item: pieces.
+      blk.qty = function () { var t = blk.type(); return !t ? 0 : t.item !== "shirt" && !$(".tset", el).hidden ? Number($(".tqty", el).value) || 0 : pieces(); };
       blk.amount = function () { return amountFor(blk.type(), blk.qty()); };
       blk.problem = function () {   // what's missing in this block (null = ok)
         var t = blk.type(), lines = blk.collect(), n = blk.qty();
         if (!t) return "ประเภทการเบิก";
         if (t.item === "shirt" && !lines.length) return "ไซส์และจำนวนเสื้อ (" + t.label + ")";
-        if (t.bundle && lines.length < bundleParts(t).filter(function (x) { return x.p; }).length) return "แบบของแต่ละรายการในชุด";
-        if (t.item !== "shirt" && itemProduct(t) && !lines.length) return "แบบของ " + t.label;
+        if (t.item !== "shirt" && vrows().length && !lines.length) return "จำนวนของแต่ละรายการใน “" + t.label + "”";
         if (t.item !== "shirt" && !(n >= 1 && n <= 99)) return "จำนวน (1–99) ของ " + t.label;
         if (t.qty && n !== t.qty) return "จำนวนเสื้อ — ประเภท “" + t.label + "” เบิกได้ " + t.qty + " ตัว (ตอนนี้ " + n + " ตัว)";
         return null;
@@ -396,7 +393,7 @@
         if (!t) { hint.textContent = ""; sub.innerHTML = ""; return; }
         if (t.item !== "shirt") {
           hint.textContent = (t.price ? "ราคา " + money(t.price) + " บาท / " + (t.bundle ? "ชุด" : "ชิ้น") : "ไม่มีค่าใช้จ่าย") + (t.photo ? " · ถ่ายรูปของที่ชำรุดแนบมาด้วย" : "");
-          sub.innerHTML = n > 0 ? "จำนวน <b>" + n + "</b>" + (t.bundle ? " ชุด" : "") + (amt ? ' · <b class="amt">' + money(amt) + " บาท</b>" : " · ไม่มีค่าใช้จ่าย") : "ระบุจำนวน";
+          sub.innerHTML = n > 0 ? "จำนวน <b>" + n + "</b>" + (t.bundle ? " ชุด" : vrows().length ? " ชิ้น" : "") + (t.bundle && vrows().length ? " · ตัดสต๊อกรวม <b>" + pieces() + "</b> ชิ้น" : "") + (amt ? ' · <b class="amt">' + money(amt) + " บาท</b>" : " · ไม่มีค่าใช้จ่าย") : vrows().length ? "กรอกจำนวนของแต่ละรายการ" : "ระบุจำนวน";
         } else if (t.purchase) {
           hint.textContent = "ระบุไซส์และจำนวนเสื้อที่ต้องการสั่งซื้อ — ระบบคำนวณยอดชำระให้อัตโนมัติ";
           sub.innerHTML = n > 0 ? 'สั่งซื้อ <b>' + n + '</b> ตัว · <b class="amt">' + money(amt) + " บาท</b>" : "ระบุจำนวนเสื้อที่ต้องการสั่งซื้อ";
@@ -407,7 +404,7 @@
       };
       sel.onchange = function () { blk.setType(); update(); };
       $(".tadd", el).onclick = function () { blk.addLine(); update(); };
-      $(".tqty", el).oninput = update; $(".tsku", el).onchange = update;
+      $(".tqty", el).oninput = function () { var n = Number(this.value) || 0; vrows().forEach(function (q) { if (q.dataset.follow) q.value = n; }); update(); };
       $(".tdel", el).onclick = function () { el.remove(); blocks.splice(blocks.indexOf(blk), 1); if (!blocks.length) addBlock(); update(); };
       $("#blocks").appendChild(el); blocks.push(blk);
       return blk;
@@ -462,7 +459,7 @@
         var mine = edit.lines.filter(function (l) { return (l.req_type || items[0].type) === it.type; });
         if (t.item !== "shirt") {
           $(".tqty", blk.el).value = it.qty;
-          mine.forEach(function (l) { var ps = $('.tparts select[data-pid="' + l.product_id + '"]', blk.el); if (ps) ps.value = l.variant_id; if (!t.bundle) $(".tsku", blk.el).value = l.variant_id; });
+          $$(".tparts .vq", blk.el).forEach(function (q) { q.value = mine.filter(function (l) { return String(l.variant_id) === q.dataset.vid; }).reduce(function (a, l) { return a + l.qty; }, 0); delete q.dataset.follow; });
         } else if (mine.length) {
           $(".tlines", blk.el).innerHTML = "";
           mine.forEach(function (l) {
@@ -716,8 +713,8 @@
     if (m === "shirt_issue") out.push("เสื้อ · เบิกได้ " + (t.qty || "?") + " ตัว · ไม่มีค่าใช้จ่าย");
     else if (m === "shirt_buy") out.push("เสื้อ · ราคาตามตารางราคาเสื้อ · พนักงานแนบสลิป");
     else {
-      if (set) out.push("เป็นชุด: " + t.products.map(function (id) { return name(id) + " 1"; }).concat(t.extras.map(function (x) { return x + " 1 (ไม่ตัดสต๊อก)"; })).join(" + ") + " ต่อชุด");
-      else if (t.products.length) out.push("ตัดสต๊อก " + name(t.products[0]) + " ต่อชิ้น");
+      if (set) out.push("เป็นชุด: " + t.products.map(name).concat(t.extras.map(function (x) { return x + " (ไม่ตัดสต๊อก)"; })).join(" + ") + " — กรอกจำนวนแต่ละรายการตอนเบิก ตัดสต๊อกตามจริง");
+      else if (t.products.length) out.push("ตัดสต๊อก " + name(t.products[0]) + " ตามจำนวนที่กรอกแต่ละแบบ");
       else out.push("ไม่ตัดสต๊อก (งานบริการ)");
       out.push(t.price ? money(t.price) + " บาท / " + (set ? "ชุด" : "ชิ้น") + " · พนักงานแนบสลิป" : "ไม่มีค่าใช้จ่าย");
     }
@@ -753,7 +750,7 @@
           : m === "item" ? field("ราคา (บาท / " + (set ? "ชุด" : "ชิ้น") + ") · 0 = ไม่มีค่าใช้จ่าย", '<input class="i tp" type="number" min="0" step="1" value="' + (t.price || 0) + '">', false)
           : '<div class="field"><label class="f">ราคา</label><p class="small muted" style="margin:8px 0 0">ตามตารางราคาเสื้อด้านล่าง</p></div>') +
         '<div class="field"><label class="f">&nbsp;</label><label class="ack tchk"><input type="checkbox" class="tph"' + (t.photo ? " checked" : "") + "> บังคับแนบรูป (เช่น กรณีชำรุด)</label></div></div>" +
-        (m === "item" ? field("สินค้าในสต๊อกที่ตัดเมื่ออนุมัติ — เลือก 1 รายการ = ต่อชิ้น · หลายรายการ = เป็นชุด (ตัดอย่างละ 1 ต่อชุด) · ไม่เลือก = ไม่ตัดสต๊อก",
+        (m === "item" ? field("สินค้าในสต๊อกที่ตัดเมื่ออนุมัติ — แบบฟอร์มจะแสดงทุกแบบ (SKU) ของสินค้าที่เลือกให้กรอกจำนวนเอง · เลือกหลายรายการ = เป็นชุด (คิดราคาต่อชุด) · ไม่เลือก = ไม่ตัดสต๊อก",
             '<div class="pchips">' + (products.length ? products.map(function (p) { return '<label class="pchip"><input type="checkbox" class="tpr" value="' + p.id + '"' + (t.products.indexOf(p.id) !== -1 ? " checked" : "") + "> " + esc(p.name) + ' <span class="muted">' + esc(p.code) + "</span></label>"; }).join("") : '<span class="small muted">ยังไม่มีสินค้าในสต๊อก</span>') + "</div>", false) +
           field("รายการในชุดที่ไม่ตัดสต๊อก (คั่นด้วย , เช่น บัตรพนักงาน)", '<input class="i te" value="' + esc(t.extras.join(", ")) + '">', false) : "") +
         '<p class="small tsum">' + esc(typeSummary(t, products)) + "</p></div>";

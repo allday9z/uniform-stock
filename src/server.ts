@@ -533,6 +533,9 @@ function checkItem(raw: any, settings: Settings, hr: boolean): CheckedItem | str
     if (service) want.clear()
     const q = int(raw.qty)
     if (!Number.isInteger(q) || q < 1 || q > 99) return bundle ? "จำนวนชุดต้องเป็นจำนวนเต็ม 1–99" : "จำนวนต้องเป็นจำนวนเต็ม 1–99"
+    // A set: the employee / HR types the quantity of each item actually issued (stock is cut by these).
+    if (bundle && !service && !want.size) return "กรุณากรอกจำนวนของแต่ละรายการในชุด"
+    if (want.size > 30) return "ได้สูงสุด 30 รายการต่อประเภท"
   } else {
     if (!want.size) return type.kind === "shirt" ? "กรุณาเลือกไซส์และจำนวนเสื้ออย่างน้อย 1 รายการ" : "กรุณาระบุจำนวน"
     if (want.size > 30) return "ได้สูงสุด 30 รายการต่อประเภท"
@@ -589,10 +592,6 @@ async function checkRequest(b: any, hr: boolean, files: { slip: boolean; photo: 
     for (const v of mine) {
       const ok = type.kind === "item" ? type.products.includes(v.product_id) : !linked.includes(v.product_id)
       if (!ok) return E(`${type.label}: รายการที่เลือกไม่ตรงกับประเภทการเบิก กรุณาเลือกใหม่`)
-    }
-    if (isBundle(type)) for (const pid of type.products) {
-      const ls = mine.filter((v) => v.product_id === pid)
-      if (ls.length !== 1 || it.want.get(ls[0].id) !== it.total) return E(`${type.label}: ต้องมีสินค้าแต่ละรายการในชุดอย่างละ 1 ต่อชุด กรุณาเลือกใหม่`)
     }
   }
   // Not enough stock → stop here (before saving any file). HR may record it anyway; approval re-checks.
