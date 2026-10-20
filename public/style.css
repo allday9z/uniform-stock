@@ -166,3 +166,15 @@ table.sizes td .chip { display: inline-block; min-width: 34px; }
 table.lines tr.grp td { background: #f1f6f6; font-weight: 600; font-size: 13px; }
 @media (max-width: 820px) { .tparts .bpart { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .tparts .bpart .bpq { grid-column: auto; text-align: right; } .tparts .bpart select + .bpq { display: none; } }
 .stockwarn { margin-top: 8px; }
+
+/* settings: request type editor */
+.tedit { border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-bottom: 12px; background: #fcfdfd; }
+.tedit.off { opacity: .6; background: #f6f7f8; }
+.tedit-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.tedit-head .tl { flex: 1 1 260px; min-width: 0; font-weight: 600; }
+.tedit-head .tno { font-weight: 700; color: var(--muted); }
+.tedit .tchk { margin: 0; white-space: nowrap; }
+.tedit .tsum { margin: 4px 0 0; color: var(--teal-d); }
+.pchips { display: flex; flex-wrap: wrap; gap: 6px; }
+.pchip { display: inline-flex; gap: 6px; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 5px 10px; font-size: 13.5px; background: #fff; cursor: pointer; }
+.pchip:has(input:checked) { border-color: var(--teal); background: var(--teal-l); }

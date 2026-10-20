@@ -21,6 +21,12 @@
     var t = {}; String(state.settings.priceTable || "").split("\n").forEach(function (l) { var m = l.match(/^\s*(\d+)\s*[=:]\s*(\d+)\s*$/); if (m) t[Number(m[1])] = Number(m[2]); });
     return t[qty] != null ? t[qty] : qty * (t[1] != null ? t[1] : 230);
   }
+  // Request types come from settings (HR edits them); add the shape the form code works with:
+  // item = "shirt" | "item", bundle = cut as a set (several parts, one of each per set).
+  function prepSettings(s) {
+    (s.requestTypes || []).forEach(function (t) { t.item = t.kind === "shirt" ? "shirt" : "item"; t.bundle = t.kind === "item" && t.products.length + t.extras.length > 1; });
+    return s;
+  }
   function typeOf(label) { return (state.settings.requestTypes || []).find(function (t) { return t.label === label; }); }
   function deliveryLine(r) {
     if (r.status === "shipped") return '<span class="badge shipped">จัดส่งแล้ว</span> วันที่ ' + thDate(r.shipped_date || r.shipped_at);
@@ -281,15 +287,14 @@
     var branchInput = s.branches.length ? dropdown("branch", s.branches, pick("branch", me.branch), "เลือกสาขา") : '<input class="i" id="branch" value="' + v("branch", me.branch) + '">';
     var posInput = (s.positions || []).length ? dropdown("position", s.positions, pick("position", me.position), "เลือกตำแหน่ง") : '<input class="i" id="position" placeholder="พิมพ์ตำแหน่ง" value="' + v("position", me.position) + '">';
     var deptInput = s.depts.length ? dropdown("dept", s.depts, pick("dept", me.dept), "เลือกแผนก") : '<input class="i" id="dept" value="' + v("dept", me.dept) + '">';
-    // Products linked to lanyard / card holder / ID card are not shirts.
-    var linkedIds = Object.keys(s.itemProducts || {}).map(function (k) { return s.itemProducts[k]; }).filter(function (x) { return x; });
+    // Products used by an item type (lanyard, card holder, …) are not shirts.
+    var linkedIds = []; s.requestTypes.forEach(function (t) { if (t.kind === "item") t.products.forEach(function (id) { if (linkedIds.indexOf(id) === -1) linkedIds.push(id); }); });
     var allProducts = cat, shirts = cat.filter(function (p) { return linkedIds.indexOf(p.id) === -1; });
     var single = shirts.length === 1 ? shirts[0] : null;
-    function productFor(item) { var id = (s.itemProducts || {})[item]; return id ? allProducts.find(function (p) { return p.id === id; }) || null : null; }
-    function itemProduct(t) { return t && t.item !== "shirt" && !t.bundle ? productFor(t.item) : null; }
-    // A bundle (e.g. lanyard + holder + card): the linked stock products of its items, one of each per set.
-    function bundleParts(t) { return t && t.bundle ? t.bundle.map(function (it) { return { item: it, p: productFor(it) }; }) : []; }
-    var ITEM_NAMES = {}; (s.items || []).forEach(function (x) { ITEM_NAMES[x.key] = x.label; });
+    function productById(id) { return allProducts.find(function (p) { return p.id === id; }) || null; }
+    function itemProduct(t) { return t && t.kind === "item" && !t.bundle && t.products.length ? productById(t.products[0]) : null; }
+    // A bundle (e.g. lanyard + holder + card): its stock products, one of each per set, plus parts not cut from stock.
+    function bundleParts(t) { return t && t.bundle ? t.products.map(function (id) { var p = productById(id); return { p: p, name: p ? p.name : "" }; }).filter(function (x) { return x.p; }).concat(t.extras.map(function (n) { return { p: null, name: n }; })) : []; }
     function amountFor(t, n) { return !t ? 0 : t.item === "shirt" ? (t.purchase ? priceFor(n) : 0) : n * (t.price || 0); }
     function variantOptions(p, ph) { return '<option value="">-- ' + (ph || "เลือกแบบ") + ' --</option>' + p.variants.map(function (x) { return '<option value="' + x.id + '">' + esc(vlabel(x)) + "</option>"; }).join(""); }
     setView((edit ? '<h1>แก้ไขคำขอ ' + esc(edit.no) + '</h1><p class="sub">HR แก้ไขข้อมูล/รายการแทนพนักงาน — สต๊อกจะถูกตัดตามรายการที่แก้ไขเมื่อกดอนุมัติ</p>'
@@ -314,9 +319,10 @@
       '<div class="err" id="err"></div>' + (edit ? '<div class="row"><a class="btn ghost" href="#/requests">ยกเลิก</a><button class="btn" id="submit">บันทึกการแก้ไข</button></div>' : '<button class="btn" id="submit">ส่งคำขอเบิก</button>') + "</div>");
 
     // ---- one block per request type ----
-    var blocks = [];
+    var blocks = [], editTypes = edit ? (edit.items && edit.items.length ? edit.items.map(function (x) { return x.type; }) : [edit.type]) : [];
+    var offered = s.requestTypes.filter(function (t) { return t.active || editTypes.indexOf(t.label) !== -1; });
     function typeSelect() {
-      return '<select class="i ttype" aria-label="ประเภทการเบิก"><option value="">-- เลือกประเภทการเบิก --</option>' + s.requestTypes.map(function (t) { return '<option value="' + esc(t.label) + '">' + esc(t.label) + (t.item !== "shirt" ? " — " + (t.price ? money(t.price) + " บาท" : "ไม่มีค่าใช้จ่าย") : "") + "</option>"; }).join("") + "</select>";
+      return '<select class="i ttype" aria-label="ประเภทการเบิก"><option value="">-- เลือกประเภทการเบิก --</option>' + offered.map(function (t) { return '<option value="' + esc(t.label) + '">' + esc(t.label) + (t.item !== "shirt" ? " — " + (t.price ? money(t.price) + " บาท" : "ไม่มีค่าใช้จ่าย") : "") + "</option>"; }).join("") + "</select>";
     }
     function addBlock() {
       var el = document.createElement("div"); el.className = "tblock";
@@ -348,7 +354,7 @@
           sku.hidden = !(ip && ip.variants.length > 1); sku.innerHTML = ip && ip.variants.length > 1 ? variantOptions(ip) : "";
           // Bundle: what one set contains; parts with several SKUs get a picker.
           $(".tparts", el).innerHTML = bundleParts(t).map(function (x) {
-            return '<div class="lrow item bpart"><div class="i prname">' + esc(x.p ? x.p.name : ITEM_NAMES[x.item] || x.item) + '</div>' + (x.p && x.p.variants.length > 1 ? '<select class="i" data-pid="' + x.p.id + '">' + variantOptions(x.p) + "</select>" : "") +
+            return '<div class="lrow item bpart"><div class="i prname">' + esc(x.name) + '</div>' + (x.p && x.p.variants.length > 1 ? '<select class="i" data-pid="' + x.p.id + '">' + variantOptions(x.p) + "</select>" : "") +
               '<div class="small muted bpq">' + (x.p ? "1 / ชุด" : "1 / ชุด · ไม่ตัดสต๊อก") + "</div></div>";
           }).join("");
           $$(".tparts select", el).forEach(function (x) { x.onchange = update; });
@@ -434,7 +440,7 @@
       });
       var typed = blocks.filter(function (b) { return b.type(); }), amt = totalAmount();
       $("#photoBlock").hidden = !blocks.some(function (b) { var t = b.type(); return t && t.photo; });
-      $("#addType").hidden = blocks.length >= 10 || blocks.length >= s.requestTypes.length;
+      $("#addType").hidden = blocks.length >= 10 || blocks.length >= offered.length;
       $("#totalBox").innerHTML = !typed.length ? "เลือกประเภทการเบิกก่อน" : (typed.length > 1 ? "รวม <b>" + typed.length + "</b> ประเภท · " : "") + (amt > 0 ? 'ยอดชำระรวม <b class="amt">' + money(amt) + " บาท</b>" : "ไม่มีค่าใช้จ่าย");
       $("#submit").textContent = edit ? "บันทึกการแก้ไข" : amt > 0 ? "ถัดไป: ชำระเงิน →" : "ส่งคำขอเบิก";
     }
@@ -600,14 +606,13 @@
   // with no stock lines (service) gets one row; an ID-card set also lists the card (no stock cut).
   function reqRows(r, cols) {
     var items = r.items && r.items.length ? r.items : [{ type: r.type, qty: r.total_qty, amount: r.amount }];
-    var names = {}; (state.settings.items || []).forEach(function (x) { names[x.key] = x.label; });
     var svc = function (name, qty) { return "<tr><td>" + esc(name) + '</td><td class="muted">ไม่ตัดสต๊อก</td><td></td><td class="n">' + qty + "</td>" + (cols > 4 ? "<td></td>" : "") + "</tr>"; };
     return items.map(function (it) {
       var t = typeOf(it.type), mine = r.lines.filter(function (l) { return (l.req_type || items[0].type) === it.type; });
       var head = items.length > 1 ? '<tr class="grp"><td colspan="' + cols + '">' + esc(it.type) + (it.amount ? " · " + money(it.amount) + " บาท" : "") + "</td></tr>" : "";
       var rows = mine.map(function (l) { return "<tr><td>" + esc(l.product_name) + "</td><td>" + esc(l.sku) + "</td><td>" + esc([l.size, l.color].filter(Boolean).join(" / ")) + '</td><td class="n">' + l.qty + " " + esc(l.unit) + "</td>" + (cols > 4 ? '<td class="n' + (l.available < l.qty ? " short" : "") + '">' + l.available + "</td>" : "") + "</tr>"; }).join("");
-      if (!mine.length) rows = svc(it.type, it.qty);
-      else if (t && t.bundle) rows += t.bundle.filter(function (x) { return !(state.settings.itemProducts || {})[x]; }).map(function (x) { return svc(names[x] || x, it.qty); }).join("");
+      if (!mine.length && !(t && t.bundle && t.extras.length)) rows = svc(it.type, it.qty);
+      if (t && t.bundle) rows += t.extras.map(function (x) { return svc(x, it.qty); }).join("");
       return head + rows;
     }).join("");
   }
@@ -701,37 +706,104 @@
   }
 
   // ---------- settings (HR) ----------
+  // Request types are edited here too: add / rename / reorder / switch off, per type a mode
+  // (shirt by entitlement, shirt purchase, or another item that cuts chosen stock products).
+  var TYPE_MODES = [["shirt_issue", "เสื้อ — เบิกตามสิทธิ์ (จำนวนตัวคงที่)"], ["shirt_buy", "เสื้อ — สั่งซื้อเพิ่ม (ราคาตามตารางราคาเสื้อ)"], ["item", "สินค้า / บริการอื่น (เลือกสินค้าในสต๊อกที่ตัด)"]];
+  function typeMode(t) { return t.kind === "shirt" ? (t.purchase ? "shirt_buy" : "shirt_issue") : "item"; }
+  function typeSummary(t, products) {
+    var name = function (id) { var p = products.find(function (x) { return x.id === id; }); return p ? p.name : "?"; };
+    var m = typeMode(t), set = t.products.length + t.extras.length > 1, out = [];
+    if (m === "shirt_issue") out.push("เสื้อ · เบิกได้ " + (t.qty || "?") + " ตัว · ไม่มีค่าใช้จ่าย");
+    else if (m === "shirt_buy") out.push("เสื้อ · ราคาตามตารางราคาเสื้อ · พนักงานแนบสลิป");
+    else {
+      if (set) out.push("เป็นชุด: " + t.products.map(function (id) { return name(id) + " 1"; }).concat(t.extras.map(function (x) { return x + " 1 (ไม่ตัดสต๊อก)"; })).join(" + ") + " ต่อชุด");
+      else if (t.products.length) out.push("ตัดสต๊อก " + name(t.products[0]) + " ต่อชิ้น");
+      else out.push("ไม่ตัดสต๊อก (งานบริการ)");
+      out.push(t.price ? money(t.price) + " บาท / " + (set ? "ชุด" : "ชิ้น") + " · พนักงานแนบสลิป" : "ไม่มีค่าใช้จ่าย");
+    }
+    if (t.photo) out.push("บังคับแนบรูป");
+    if (!t.active) out.push("ปิดใช้งาน — ไม่แสดงในแบบฟอร์ม");
+    return out.join(" · ");
+  }
   async function viewSettings() {
     var s = state.settings, products = await api("/api/catalog");
-    var priceRows = s.requestTypes.filter(function (t) { return t.priceKey; });
-    var linkSel = function (key, label) {
-      var cur = (s.itemProducts || {})[key];
-      return field(label, '<select class="i" data-link="' + key + '"><option value="">— ไม่ตัดสต๊อก —</option>' + products.map(function (p) { return '<option value="' + p.id + '"' + (cur === p.id ? " selected" : "") + ">" + esc(p.name) + " (" + esc(p.code) + ")</option>"; }).join("") + "</select>", false);
-    };
+    var types = s.requestTypes.map(function (t) { return { id: t.id, label: t.label, kind: t.kind, qty: t.qty, purchase: t.purchase, price: t.price, products: t.products.slice(), extras: t.extras.slice(), photo: t.photo, active: t.active }; });
     setView('<h1>ตั้งค่า</h1><p class="sub">ข้อมูลที่ใช้ในแบบฟอร์มขอเบิกและใบส่งสินค้า</p><div class="card">' +
       field("ชื่อหน่วยงานบนใบส่งสินค้า", '<input class="i" id="co" value="' + esc(s.company) + '" placeholder="เช่น บริษัท ตัวอย่าง จำกัด — ฝ่ายทรัพยากรบุคคล">', false) +
       '<p class="small muted">รายชื่อด้านล่างจะแสดงเป็น Dropdown ในแบบฟอร์มของพนักงาน (ถ้าเว้นว่าง จะให้พิมพ์เอง)</p>' +
       '<div class="grid3">' + field("รายชื่อสาขา (บรรทัดละ 1 สาขา)", '<textarea class="i" id="br" rows="10">' + esc(s.branches.join("\n")) + "</textarea>", false) +
       field("รายชื่อตำแหน่ง (บรรทัดละ 1 ตำแหน่ง)", '<textarea class="i" id="ps" rows="10">' + esc((s.positions || []).join("\n")) + "</textarea>", false) +
       field("รายชื่อแผนก / ฝ่าย (บรรทัดละ 1 รายการ)", '<textarea class="i" id="dp" rows="10">' + esc(s.depts.join("\n")) + "</textarea>", false) + "</div>" +
-      '<h3>สั่งซื้อเสื้อเพิ่ม</h3><div class="grid2">' +
-      field("ราคาตามจำนวน (บรรทัดละ จำนวน=ราคา)", '<textarea class="i" id="pt" rows="5">' + esc(s.priceTable || "") + '</textarea><p class="small muted">จำนวนที่ไม่ได้ระบุ = จำนวน × ราคาของ 1 ตัว · ตัวอย่าง: 3 ตัว = 3 × ' + money(priceFor(1)) + ' = ' + money(priceFor(3)) + " บาท</p>", true) +
+      '<h3 id="typesHead">ประเภทการเบิก / รายการที่ขอเบิก</h3>' +
+      '<p class="small muted">เพิ่ม แก้ไข เรียงลำดับ หรือปิดใช้งานประเภทการเบิกที่แสดงในแบบฟอร์มได้เอง · สินค้าที่เลือกในประเภท “สินค้า / บริการอื่น” จะไม่แสดงในรายการเสื้อ · เปลี่ยนชื่อหรือลบประเภทแล้ว คำขอเดิมยังแสดงชื่อเดิม</p>' +
+      '<div id="types"></div><button class="btn sm ghost" id="addTypeDef">+ เพิ่มประเภทการเบิก</button>' +
+      '<h3>ราคาเสื้อ / การชำระเงิน</h3><div class="grid2">' +
+      field("ราคาเสื้อตามจำนวน (บรรทัดละ จำนวน=ราคา)", '<textarea class="i" id="pt" rows="5">' + esc(s.priceTable || "") + '</textarea><p class="small muted">ใช้กับประเภท “เสื้อ — สั่งซื้อเพิ่ม” · จำนวนที่ไม่ได้ระบุ = จำนวน × ราคาของ 1 ตัว · ตัวอย่าง: 3 ตัว = 3 × ' + money(priceFor(1)) + ' = ' + money(priceFor(3)) + " บาท</p>", true) +
       field("ช่องทางการชำระเงิน (แสดงตอนพนักงานกดชำระเงิน)", '<textarea class="i" id="pi" rows="5" placeholder="เช่น โอนเข้าบัญชี … ธนาคาร … เลขที่ … ชื่อบัญชี …">' + esc(s.payInfo || "") + "</textarea>", false) + "</div>" +
-      '<h3>สายคล้องคอ / กรอบบัตร / บัตรพนักงาน</h3>' +
-      '<p class="small muted">ราคาต่อชิ้น (0 = ไม่มีค่าใช้จ่าย ไม่ต้องชำระเงิน) และสินค้าในสต๊อกที่ใช้ตัดยอดเมื่ออนุมัติ — ถ้าไม่ผูก จะไม่ตัดสต๊อก (เช่น ออกบัตรใหม่) · สินค้าที่ผูกไว้จะไม่แสดงในรายการเสื้อ</p>' +
-      '<div class="grid2">' + priceRows.map(function (t) { return field(esc(t.label) + (t.bundle ? " (บาท / ชุด)" : " (บาท / ชิ้น)"), '<input class="i" type="number" min="0" step="1" data-price="' + t.priceKey + '" value="' + (t.price || 0) + '">', false); }).join("") + "</div>" +
-      '<div class="grid3">' + linkSel("lanyard", "สินค้าในสต๊อก: สายคล้องคอ") + linkSel("cardholder", "สินค้าในสต๊อก: กรอบบัตร") + linkSel("idcard", "สินค้าในสต๊อก: บัตรพนักงาน") + "</div>" +
       '<p class="small muted">อีเมลแจ้งพนักงานเมื่อจัดส่งแล้ว: ' + (s.mailEnabled ? '<span class="badge shipped">เปิดใช้งาน</span> (ส่งจาก no-reply@uficon.com)' : '<span class="badge rejected">ยังไม่ได้ตั้งค่า</span>') + "</p>" +
       '<div class="err" id="err"></div><button class="btn" id="save">บันทึกการตั้งค่า</button></div>');
+    function typeCard(t, i) {
+      var m = typeMode(t), set = t.products.length + t.extras.length > 1;
+      return '<div class="tedit' + (t.active ? "" : " off") + '" data-i="' + i + '">' +
+        '<div class="tedit-head"><span class="tno">' + (i + 1) + '.</span><input class="i tl" value="' + esc(t.label) + '" placeholder="ชื่อประเภทการเบิก เช่น สายคล้องคอ (กรณีสูญหาย)" aria-label="ชื่อประเภทการเบิก">' +
+        '<label class="ack tchk"><input type="checkbox" class="ta"' + (t.active ? " checked" : "") + "> เปิดใช้งาน</label>" +
+        '<button class="btn sm ghost tu" title="เลื่อนขึ้น"' + (i ? "" : " disabled") + '>↑</button><button class="btn sm ghost td" title="เลื่อนลง"' + (i < types.length - 1 ? "" : " disabled") + '>↓</button><button class="btn sm danger tx">ลบ</button></div>' +
+        '<div class="grid3">' + field("รูปแบบ", '<select class="i tm">' + TYPE_MODES.map(function (x) { return '<option value="' + x[0] + '"' + (x[0] === m ? " selected" : "") + ">" + x[1] + "</option>"; }).join("") + "</select>", true) +
+        (m === "shirt_issue" ? field("จำนวนตัวตามสิทธิ์", '<input class="i tq" type="number" min="1" max="50" step="1" value="' + (t.qty || "") + '">', true)
+          : m === "item" ? field("ราคา (บาท / " + (set ? "ชุด" : "ชิ้น") + ") · 0 = ไม่มีค่าใช้จ่าย", '<input class="i tp" type="number" min="0" step="1" value="' + (t.price || 0) + '">', false)
+          : '<div class="field"><label class="f">ราคา</label><p class="small muted" style="margin:8px 0 0">ตามตารางราคาเสื้อด้านล่าง</p></div>') +
+        '<div class="field"><label class="f">&nbsp;</label><label class="ack tchk"><input type="checkbox" class="tph"' + (t.photo ? " checked" : "") + "> บังคับแนบรูป (เช่น กรณีชำรุด)</label></div></div>" +
+        (m === "item" ? field("สินค้าในสต๊อกที่ตัดเมื่ออนุมัติ — เลือก 1 รายการ = ต่อชิ้น · หลายรายการ = เป็นชุด (ตัดอย่างละ 1 ต่อชุด) · ไม่เลือก = ไม่ตัดสต๊อก",
+            '<div class="pchips">' + (products.length ? products.map(function (p) { return '<label class="pchip"><input type="checkbox" class="tpr" value="' + p.id + '"' + (t.products.indexOf(p.id) !== -1 ? " checked" : "") + "> " + esc(p.name) + ' <span class="muted">' + esc(p.code) + "</span></label>"; }).join("") : '<span class="small muted">ยังไม่มีสินค้าในสต๊อก</span>') + "</div>", false) +
+          field("รายการในชุดที่ไม่ตัดสต๊อก (คั่นด้วย , เช่น บัตรพนักงาน)", '<input class="i te" value="' + esc(t.extras.join(", ")) + '">', false) : "") +
+        '<p class="small tsum">' + esc(typeSummary(t, products)) + "</p></div>";
+    }
+    // Read one card back into its type (text fields are read on save / re-render, not re-rendered while typing).
+    function gather(card) {
+      var t = types[Number(card.dataset.i)], m = $(".tm", card).value;
+      t.label = $(".tl", card).value; t.active = $(".ta", card).checked; t.photo = $(".tph", card).checked;
+      t.kind = m === "item" ? "item" : "shirt"; t.purchase = m === "shirt_buy";
+      if ($(".tq", card)) t.qty = Number($(".tq", card).value) || null;
+      if ($(".tp", card)) t.price = $(".tp", card).value === "" ? 0 : Number($(".tp", card).value);
+      if ($(".te", card)) t.extras = $(".te", card).value.split(",").map(function (x) { return x.trim(); }).filter(Boolean);
+      if ($(".tpr", card) || m === "item") t.products = $$(".tpr", card).filter(function (x) { return x.checked; }).map(function (x) { return Number(x.value); });
+      if (m !== "item") { t.products = []; t.extras = []; }
+      return t;
+    }
+    function gatherAll() { $$("#types .tedit").forEach(gather); }
+    function renderTypes() {
+      $("#types").innerHTML = types.map(typeCard).join("");
+      $$("#types .tedit").forEach(function (card) {
+        var i = Number(card.dataset.i);
+        card.addEventListener("change", function (e) {
+          var t = gather(card);
+          if (e.target.classList.contains("tm") || e.target.classList.contains("tpr") || e.target.classList.contains("te")) { gatherAll(); renderTypes(); return; }   // fields / unit depend on these
+          card.classList.toggle("off", !t.active); $(".tsum", card).textContent = typeSummary(t, products);
+        });
+        $(".tu", card).onclick = function () { gatherAll(); var x = types.splice(i, 1)[0]; types.splice(i - 1, 0, x); renderTypes(); };
+        $(".td", card).onclick = function () { gatherAll(); var x = types.splice(i, 1)[0]; types.splice(i + 1, 0, x); renderTypes(); };
+        $(".tx", card).onclick = function () {
+          gatherAll(); if (!confirm('ลบประเภท "' + (types[i].label || "(ไม่มีชื่อ)") + '"? — คำขอเดิมยังแสดงชื่อประเภทนี้อยู่')) return;
+          types.splice(i, 1); renderTypes();
+        };
+      });
+    }
+    renderTypes();
+    $("#addTypeDef").onclick = function () {
+      gatherAll();
+      types.push({ id: "", label: "", kind: "item", qty: null, purchase: false, price: 0, products: [], extras: [], photo: false, active: true });
+      renderTypes(); var last = $$("#types .tedit").pop(); $(".tl", last).focus(); last.scrollIntoView({ block: "center" });
+    };
     $("#save").onclick = async function () {
-      var prices = {}, links = {};
-      $$("[data-price]").forEach(function (i) { prices[i.dataset.price] = i.value; });
-      $$("[data-link]").forEach(function (i) { links[i.dataset.link] = i.value ? Number(i.value) : null; });
+      gatherAll();
+      var blank = types.findIndex(function (t) { return !t.label.trim(); });
+      if (blank !== -1) { $("#err").textContent = "กรุณาตั้งชื่อประเภทการเบิกลำดับที่ " + (blank + 1); return; }
+      busy(this, true);
       try {
-        await api("/api/settings", { method: "PUT", body: { company: $("#co").value, branches: $("#br").value, positions: $("#ps").value, depts: $("#dp").value, priceTable: $("#pt").value, payInfo: $("#pi").value, prices: prices, itemProducts: links } });
-        state.settings = await api("/api/settings"); toast("บันทึกการตั้งค่าแล้ว"); viewSettings();
+        await api("/api/settings", { method: "PUT", body: { company: $("#co").value, branches: $("#br").value, positions: $("#ps").value, depts: $("#dp").value, priceTable: $("#pt").value, payInfo: $("#pi").value, requestTypes: types } });
+        state.settings = prepSettings(await api("/api/settings")); toast("บันทึกการตั้งค่าแล้ว"); viewSettings();
       }
-      catch (e) { $("#err").textContent = e.message; }
+      catch (e) { $("#err").textContent = e.message; busy(this, false); }
     };
   }
 
@@ -796,7 +868,7 @@
   }
   async function boot() {
     state.me = (await api("/api/me")).user;
-    if (state.me) state.settings = await api("/api/settings");
+    if (state.me) state.settings = prepSettings(await api("/api/settings"));
   }
   window.addEventListener("hashchange", route);
   boot().then(route).catch(function () { app.innerHTML = '<div class="card empty">เชื่อมต่อระบบไม่สำเร็จ กรุณารีเฟรช</div>'; });

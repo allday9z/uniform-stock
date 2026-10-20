@@ -23,30 +23,54 @@ const PORT = Number(process.env.PORT ?? 3000)
 const COOKIE = "uni_session"
 const SESSION_DAYS = 30
 const HR_SETUP_CODE = process.env.HR_SETUP_CODE ?? ""
-// Request types (HR spec, Oct 2026).
-//  item "shirt": a fixed number of shirts per type, or a paid purchase (price table).
-//  other items (lanyard / card holder / ID card): quantity × unit price (prices editable
-//  in settings). An item draws stock from the product HR links to it in settings; an
-//  item with no linked product (e.g. issuing a new ID card) is a service — no stock.
-type Item = "shirt" | "lanyard" | "cardholder" | "idcard" | "idset"
-// bundle: the items a set is made of (stock is cut for each linked one); photo: a photo of the damaged item is required.
-type RequestType = { label: string; item: Item; qty?: number; purchase?: boolean; priceKey?: string; price?: number; bundle?: Item[]; photo?: boolean }
-const ITEMS: { key: Item; label: string }[] = [
-  { key: "shirt", label: "เสื้อยูนิฟอร์ม" }, { key: "lanyard", label: "สายคล้องคอ" }, { key: "cardholder", label: "กรอบบัตร" }, { key: "idcard", label: "บัตรพนักงาน" },
-]
-const REQUEST_TYPES: RequestType[] = [
-  { label: "พนักงานใหม่ (2 ตัว)", item: "shirt", qty: 2 },
-  { label: "พนักงานใหม่ (1 ตัว สำหรับพนักงาน HO)", item: "shirt", qty: 1 },
-  { label: "พนักงานผ่านทดลองงาน (3 ตัว)", item: "shirt", qty: 3 },
-  { label: "พนักงานต่อสัญญาจ้าง (3 ตัว)", item: "shirt", qty: 3 },
-  { label: "พนักงานต้องการซื้อเสื้อเพิ่ม", item: "shirt", purchase: true },
-  { label: "ชุดบัตรพนักงาน สาย+กรอบ+บัตร (กรณีสูญหาย)", item: "idset", priceKey: "idset_lost", price: 300, bundle: ["lanyard", "cardholder", "idcard"] },
-  { label: "สายคล้องคอ (กรณีสูญหาย)", item: "lanyard", priceKey: "lanyard", price: 50 },
-  { label: "กรอบบัตร (กรณีสูญหาย)", item: "cardholder", priceKey: "cardholder_lost", price: 50 },
-  { label: "เปลี่ยนกรอบบัตร (กรณีชำรุด)", item: "cardholder", priceKey: "cardholder_damaged", price: 0, photo: true },
-  { label: "ออกบัตรใหม่", item: "idcard", priceKey: "idcard", price: 200 },
-]
-const DEFAULT_PRICES: Record<string, number> = Object.fromEntries(REQUEST_TYPES.filter((t) => t.priceKey).map((t) => [t.priceKey!, t.price!]))
+// Request types — HR adds / edits them in settings (htask-1792411531746).
+//  kind "shirt": shirts (stock products not used by any item type); qty = fixed entitlement,
+//    purchase = paid, priced by the shirt price table.
+//  kind "item": products = stock products cut on approval — one product = per piece, several
+//    (or products + extras) = a set with one of each per set; extras = parts listed on the request
+//    but not cut from stock (e.g. the ID card itself); no products at all = a service (no stock).
+//  price = baht per piece / set (0 = free); photo = a photo of the damaged item is required;
+//  active = offered in the form (old requests keep the type label as text).
+type RequestType = { id: string; label: string; kind: "shirt" | "item"; qty: number | null; purchase: boolean; price: number; products: number[]; extras: string[]; photo: boolean; active: boolean }
+const isBundle = (t: RequestType) => t.kind === "item" && t.products.length + t.extras.length > 1
+// The built-in list (Oct 2026 HR spec) — becomes the editable list the first time settings load.
+// Old settings linked stock products per item (itemProducts) and kept prices by key (prices).
+function legacyTypes(v: any): RequestType[] {
+  const link = (k: string): number[] => (Number.isInteger(v.itemProducts?.[k]) ? [v.itemProducts[k]] : [])
+  const price = (k: string, d: number) => (Number.isInteger(v.prices?.[k]) ? v.prices[k] : d)
+  const names: Record<string, string> = { lanyard: "สายคล้องคอ", cardholder: "กรอบบัตร", idcard: "บัตรพนักงาน" }
+  const set = ["lanyard", "cardholder", "idcard"]
+  const base = { qty: null, purchase: false, price: 0, products: [] as number[], extras: [] as string[], photo: false, active: true }
+  const shirt = (id: string, label: string, qty: number | null) => ({ ...base, id, label, kind: "shirt" as const, qty, purchase: qty === null })
+  const item = (id: string, label: string, p: number, products: number[], extra: Partial<RequestType> = {}) => ({ ...base, id, label, kind: "item" as const, price: p, products, ...extra })
+  return [
+    shirt("new2", "พนักงานใหม่ (2 ตัว)", 2), shirt("new1ho", "พนักงานใหม่ (1 ตัว สำหรับพนักงาน HO)", 1),
+    shirt("probation3", "พนักงานผ่านทดลองงาน (3 ตัว)", 3), shirt("renew3", "พนักงานต่อสัญญาจ้าง (3 ตัว)", 3),
+    shirt("buy", "พนักงานต้องการซื้อเสื้อเพิ่ม", null),
+    item("idset", "ชุดบัตรพนักงาน สาย+กรอบ+บัตร (กรณีสูญหาย)", price("idset_lost", 300), set.flatMap(link), { extras: set.filter((k) => !link(k).length).map((k) => names[k]!) }),
+    item("lanyard", "สายคล้องคอ (กรณีสูญหาย)", price("lanyard", 50), link("lanyard")),
+    item("holder_lost", "กรอบบัตร (กรณีสูญหาย)", price("cardholder_lost", 50), link("cardholder")),
+    item("holder_damaged", "เปลี่ยนกรอบบัตร (กรณีชำรุด)", price("cardholder_damaged", 0), link("cardholder"), { photo: true }),
+    item("idcard", "ออกบัตรใหม่", price("idcard", 200), link("idcard")),
+  ]
+}
+// Clean one type from settings / the settings form. Returns an error message for bad input.
+function cleanType(t: any, live: Set<number> | null): RequestType | string {
+  const label = str(t?.label, 60)
+  if (!label) return "กรุณาตั้งชื่อประเภทการเบิกให้ครบ"
+  const kind = t?.kind === "shirt" ? "shirt" : "item"
+  const purchase = kind === "shirt" && t?.purchase === true
+  const qty = kind === "shirt" && !purchase ? int(t?.qty) : null
+  if (qty !== null && (!Number.isInteger(qty) || qty < 1 || qty > 50)) return `"${label}": จำนวนตัวตามสิทธิ์ต้องเป็น 1–50`
+  const price = kind === "item" ? (t?.price === "" || t?.price == null ? 0 : int(t.price)) : 0
+  if (!Number.isInteger(price) || price < 0 || price > 100000) return `"${label}": ราคาต้องเป็นจำนวนเต็มตั้งแต่ 0`
+  const products = kind === "item" ? [...new Set((Array.isArray(t?.products) ? t.products : []).map(int).filter((x: number) => Number.isInteger(x)))] as number[] : []
+  if (live && products.some((x) => !live.has(x))) return `"${label}": สินค้าที่เลือกไม่มีในสต๊อกแล้ว`
+  const extras = kind === "item" ? (Array.isArray(t?.extras) ? t.extras : String(t?.extras ?? "").split(",")).map((x: any) => str(x, 60)).filter(Boolean).slice(0, 10) : []
+  if (products.length > 10) return `"${label}": เลือกสินค้าได้สูงสุด 10 รายการ`
+  const id = /^[\w-]{1,40}$/.test(String(t?.id ?? "")) ? String(t.id) : "t" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+  return { id, label, kind, qty, purchase, price, products, extras, photo: t?.photo === true, active: t?.active !== false }
+}
 const MAX_SLIP_BYTES = 6 * 1024 * 1024
 const SLIP_TYPES = ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "application/pdf"]
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/
@@ -195,14 +219,18 @@ app.use("/api/*", async (c, next) => {
 const hrOnly = async (c: any, next: any) => { if (!isHR(c)) return bad(c, "forbidden", 403); await next() }
 
 // ---------- settings ----------
-type Settings = { company: string; branches: string[]; depts: string[]; positions: string[]; priceTable: string; payInfo: string; prices: Record<string, number>; itemProducts: Record<string, number | null> }
+type Settings = { company: string; branches: string[]; depts: string[]; positions: string[]; priceTable: string; payInfo: string; requestTypes: RequestType[] }
 // priceTable: one "จำนวน=ราคา" per line; quantities not listed = qty × price of 1 shirt.
 const DEFAULT_PRICE_TABLE = "1=230\n2=480"
 async function getSettings(): Promise<Settings> {
   const [r] = await sql`SELECT value FROM uni_settings WHERE key = 'main'`
   const v = r?.value ?? {}
-  return { company: "", branches: [], depts: [], positions: [], priceTable: DEFAULT_PRICE_TABLE, payInfo: "", ...v,
-    prices: { ...DEFAULT_PRICES, ...(v.prices ?? {}) }, itemProducts: { lanyard: null, cardholder: null, idcard: null, ...(v.itemProducts ?? {}) } }
+  const types: RequestType[] = Array.isArray(v.requestTypes) ? v.requestTypes.map((t: any) => cleanType(t, null)).filter((t: any) => typeof t !== "string") : legacyTypes(v)
+  // A product deleted from stock drops out of the types that used it.
+  const live = new Set((await sql`SELECT id FROM uni_products WHERE deleted_at IS NULL`).map((x: any) => x.id))
+  for (const t of types) t.products = t.products.filter((id) => live.has(id))
+  const { prices, itemProducts, ...rest } = v
+  return { company: "", branches: [], depts: [], positions: [], priceTable: DEFAULT_PRICE_TABLE, payInfo: "", ...rest, requestTypes: types }
 }
 function parsePriceTable(text: string): Map<number, number> {
   const m = new Map<number, number>()
@@ -217,35 +245,31 @@ function priceFor(qty: number, s: Settings): number {
   if (t.has(qty)) return t.get(qty)!
   return qty * (t.get(1) ?? 230)
 }
-// Types as the form needs them: unit price resolved from settings.
-function typesFor(s: Settings) {
-  return REQUEST_TYPES.map((t) => (t.priceKey ? { ...t, price: s.prices[t.priceKey] ?? t.price } : t))
-}
-// Products linked to a non-shirt item — they don't appear in the shirt list.
+// Products used by an item type — they don't appear in the shirt list.
 function linkedProductIds(s: Settings): number[] {
-  return Object.values(s.itemProducts).filter((x): x is number => Number.isInteger(x))
+  return [...new Set(s.requestTypes.flatMap((t) => (t.kind === "item" ? t.products : [])))]
 }
-app.get("/api/settings", async (c) => { const s = await getSettings(); return c.json({ ...s, requestTypes: typesFor(s), items: ITEMS, mailEnabled }) })
+app.get("/api/settings", async (c) => { const s = await getSettings(); return c.json({ ...s, mailEnabled }) })
 app.put("/api/settings", hrOnly, async (c) => {
   const b = await c.req.json().catch(() => ({}))
   const list = (v: any) => (Array.isArray(v) ? v : String(v ?? "").split("\n")).map((s: any) => str(s, 100)).filter(Boolean).filter((s: string, i: number, a: string[]) => a.indexOf(s) === i).slice(0, 300)
   const priceTable = String(b.priceTable ?? "").split("\n").map((l) => l.trim()).filter(Boolean)
   for (const l of priceTable) if (!/^\d+\s*[=:]\s*\d+$/.test(l)) return bad(c, `ราคาตามจำนวนไม่ถูกต้อง: "${l}" (ใช้รูปแบบ จำนวน=ราคา เช่น 1=230)`)
   if (!parsePriceTable(priceTable.join("\n")).has(1)) return bad(c, "ราคาตามจำนวนต้องมีราคาของ 1 ตัว (เช่น 1=230)")
-  const prices: Record<string, number> = {}
-  for (const k of Object.keys(DEFAULT_PRICES)) {
-    const v = b.prices?.[k] === undefined || b.prices?.[k] === "" ? DEFAULT_PRICES[k] : int(b.prices[k])
-    if (!Number.isInteger(v) || v < 0 || v > 100000) return bad(c, "ราคาต้องเป็นจำนวนเต็มตั้งแต่ 0")
-    prices[k] = v
-  }
-  const itemProducts: Record<string, number | null> = {}
+  // Request types: the whole list as edited on the settings page (order = order in the form).
   const live = new Set((await sql`SELECT id FROM uni_products WHERE deleted_at IS NULL`).map((r: any) => r.id))
-  for (const k of ["lanyard", "cardholder", "idcard"]) {
-    const v = b.itemProducts?.[k] ? int(b.itemProducts[k]) : null
-    if (v !== null && !live.has(v)) return bad(c, "สินค้าที่ผูกกับประเภทไม่ถูกต้อง")
-    itemProducts[k] = v
+  const raw = Array.isArray(b.requestTypes) ? b.requestTypes : (await getSettings()).requestTypes
+  if (raw.length > 60) return bad(c, "ประเภทการเบิกได้สูงสุด 60 รายการ")
+  const requestTypes: RequestType[] = []
+  for (const t of raw) {
+    const ct = cleanType(t, live)
+    if (typeof ct === "string") return bad(c, ct)
+    if (requestTypes.some((x) => x.label === ct.label)) return bad(c, `ชื่อประเภท "${ct.label}" ซ้ำกัน`)
+    if (requestTypes.some((x) => x.id === ct.id)) ct.id += Math.random().toString(36).slice(2, 5)
+    requestTypes.push(ct)
   }
-  const value: Settings = { company: str(b.company, 200), branches: list(b.branches), depts: list(b.depts), positions: list(b.positions), priceTable: priceTable.join("\n"), payInfo: str(b.payInfo, 1000), prices, itemProducts }
+  if (!requestTypes.some((t) => t.active)) return bad(c, "ต้องมีประเภทการเบิกที่เปิดใช้งานอย่างน้อย 1 รายการ")
+  const value: Settings = { company: str(b.company, 200), branches: list(b.branches), depts: list(b.depts), positions: list(b.positions), priceTable: priceTable.join("\n"), payInfo: str(b.payInfo, 1000), requestTypes }
   await sql`UPDATE uni_settings SET value = ${sql.json(value)} WHERE key = 'main'`
   return c.json(value)
 })
@@ -492,8 +516,9 @@ async function readRequestBody(c: any): Promise<{ b: any; slip: FileIn | null; p
 // details, one payment (sum of the items) and one approval / delivery note.
 type CheckedItem = { type: RequestType; total: number; amount: number; want: Map<number, number> }
 type Checked = { f: any; items: CheckedItem[]; total: number; amount: number; vs: any[]; want: Map<number, number> }
-function checkItem(raw: any, settings: Settings): CheckedItem | string {
-  const type = typesFor(settings).find((t) => t.label === str(raw?.type, 60))
+function checkItem(raw: any, settings: Settings, hr: boolean): CheckedItem | string {
+  // Employees pick from active types; HR may keep a type that was switched off since (editing).
+  const type = settings.requestTypes.find((t) => t.label === str(raw?.type, 60) && (t.active || hr))
   if (!type) return "กรุณาเลือกประเภทการเบิก"
   const rawLines = Array.isArray(raw.lines) ? raw.lines : []
   const want = new Map<number, number>()
@@ -503,18 +528,18 @@ function checkItem(raw: any, settings: Settings): CheckedItem | string {
     want.set(vid, (want.get(vid) ?? 0) + qty)
   }
   // Service item (no linked stock product): just a quantity, no lines.
-  const service = type.item !== "shirt" && !type.bundle && !settings.itemProducts[type.item]
-  if (type.bundle || service) {
+  const bundle = isBundle(type), service = type.kind === "item" && !type.products.length
+  if (bundle || service) {
     if (service) want.clear()
     const q = int(raw.qty)
-    if (!Number.isInteger(q) || q < 1 || q > 99) return type.bundle ? "จำนวนชุดต้องเป็นจำนวนเต็ม 1–99" : "จำนวนต้องเป็นจำนวนเต็ม 1–99"
+    if (!Number.isInteger(q) || q < 1 || q > 99) return bundle ? "จำนวนชุดต้องเป็นจำนวนเต็ม 1–99" : "จำนวนต้องเป็นจำนวนเต็ม 1–99"
   } else {
-    if (!want.size) return type.item === "shirt" ? "กรุณาเลือกไซส์และจำนวนเสื้ออย่างน้อย 1 รายการ" : "กรุณาระบุจำนวน"
+    if (!want.size) return type.kind === "shirt" ? "กรุณาเลือกไซส์และจำนวนเสื้ออย่างน้อย 1 รายการ" : "กรุณาระบุจำนวน"
     if (want.size > 30) return "ได้สูงสุด 30 รายการต่อประเภท"
   }
-  const total = service || type.bundle ? int(raw.qty) : [...want.values()].reduce((a, n) => a + n, 0)
+  const total = service || bundle ? int(raw.qty) : [...want.values()].reduce((a, n) => a + n, 0)
   if (type.qty && total !== type.qty) return `ประเภท "${type.label}" เบิกได้ ${type.qty} ตัว (ตอนนี้เลือก ${total} ตัว)`
-  const amount = type.item === "shirt" ? (type.purchase ? priceFor(total, settings) : 0) : total * (type.price ?? 0)
+  const amount = type.kind === "shirt" ? (type.purchase ? priceFor(total, settings) : 0) : total * type.price
   return { type, total, amount, want }
 }
 async function checkRequest(b: any, hr: boolean, files: { slip: boolean; photo: boolean }): Promise<Checked | { error: string; status?: number; short?: any }> {
@@ -536,7 +561,7 @@ async function checkRequest(b: any, hr: boolean, files: { slip: boolean; photo: 
   if (rawItems.length > 10) return E("ได้สูงสุด 10 ประเภทต่อคำขอ")
   const items: CheckedItem[] = []
   for (const raw of rawItems) {
-    const it = checkItem(raw, settings)
+    const it = checkItem(raw, settings, hr)
     if (typeof it === "string") return E(rawItems.length > 1 && raw?.type && !it.includes(str(raw.type, 60)) ? `${str(raw.type, 60)}: ${it}` : it)
     if (items.some((x) => x.type.label === it.type.label)) return E(`เลือกประเภท "${it.type.label}" ซ้ำ — กรุณารวมเป็นรายการเดียว`)
     items.push(it)
@@ -561,15 +586,13 @@ async function checkRequest(b: any, hr: boolean, files: { slip: boolean; photo: 
   const linked = linkedProductIds(settings)
   for (const it of items) {
     const type = it.type, mine = (vs as any[]).filter((v) => it.want.has(v.id))
-    const parts = type.bundle ? type.bundle.map((x) => settings.itemProducts[x] ?? null).filter((x): x is number => Number.isInteger(x)) : []
-    const itemProduct = type.item === "shirt" || type.bundle ? null : settings.itemProducts[type.item] ?? null
     for (const v of mine) {
-      const ok = type.bundle ? parts.includes(v.product_id) : itemProduct ? v.product_id === itemProduct : !linked.includes(v.product_id)
+      const ok = type.kind === "item" ? type.products.includes(v.product_id) : !linked.includes(v.product_id)
       if (!ok) return E(`${type.label}: รายการที่เลือกไม่ตรงกับประเภทการเบิก กรุณาเลือกใหม่`)
     }
-    if (type.bundle) for (const pid of parts) {
+    if (isBundle(type)) for (const pid of type.products) {
       const ls = mine.filter((v) => v.product_id === pid)
-      if (ls.length !== 1 || it.want.get(ls[0].id) !== it.total) return E("ชุดบัตรต้องมีสายคล้องคอและกรอบบัตรอย่างละ 1 ต่อชุด กรุณาเลือกใหม่")
+      if (ls.length !== 1 || it.want.get(ls[0].id) !== it.total) return E(`${type.label}: ต้องมีสินค้าแต่ละรายการในชุดอย่างละ 1 ต่อชุด กรุณาเลือกใหม่`)
     }
   }
   // Not enough stock → stop here (before saving any file). HR may record it anyway; approval re-checks.
@@ -620,12 +643,11 @@ function reqItems(r: any): { type: string; qty: number; amount: number }[] {
 // (a service item such as a new ID card, or the card in an ID-card set).
 function displayRows(r: any, lines: any[], s: Settings): { sku: string; product_name: string; size: string; color: string; qty: number; unit: string }[] {
   const items = reqItems(r), rows = [...lines]
-  const names = Object.fromEntries(ITEMS.map((x) => [x.key, x.label]))
   for (const it of items) {
     const has = lines.some((l) => (l.req_type || items[0].type) === it.type)
-    const t = REQUEST_TYPES.find((x) => x.label === it.type)
-    if (!has) rows.push({ sku: "", product_name: it.type, size: "", color: "", qty: it.qty, unit: "" })
-    else if (t?.bundle) for (const part of t.bundle) if (!s.itemProducts[part]) rows.push({ sku: "", product_name: names[part] ?? part, size: "", color: "", qty: it.qty, unit: "" })
+    const t = s.requestTypes.find((x) => x.label === it.type)
+    if (!has && !(t && isBundle(t) && t.extras.length)) rows.push({ sku: "", product_name: it.type, size: "", color: "", qty: it.qty, unit: "" })
+    if (t && isBundle(t)) for (const x of t.extras) rows.push({ sku: "", product_name: x, size: "", color: "", qty: it.qty, unit: "" })
   }
   return rows
 }
